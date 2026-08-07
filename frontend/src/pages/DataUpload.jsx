@@ -1,8 +1,8 @@
 import { useEffect, useState, useRef } from "react";
-import { endpoints, fmt } from "@/lib/api";
+import { API, endpoints, fmt } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Upload, FileSpreadsheet, CheckCircle2, XCircle } from "lucide-react";
+import { Upload, FileSpreadsheet, CheckCircle2, XCircle, Download } from "lucide-react";
 import { toast } from "sonner";
 
 const KINDS = [
@@ -45,15 +45,27 @@ function UploadTile({ kind, onDone }) {
           </div>
         </div>
         <input ref={ref} type="file" accept=".xlsx,.xls" onChange={handle} className="hidden" data-testid={`upload-input-${kind.key}`}/>
-        <Button
-          data-testid={`upload-btn-${kind.key}`}
-          onClick={() => ref.current?.click()}
-          disabled={busy}
-          className="mt-4 w-full bg-blue-600 hover:bg-blue-700"
-        >
-          <Upload size={14} className="mr-2" />
-          {busy ? "Uploading..." : "Choose Excel file"}
-        </Button>
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <Button
+            data-testid={`template-btn-${kind.key}`}
+            variant="outline"
+            asChild
+          >
+            <a href={`${API}/templates/${kind.key}`} download>
+              <Download size={14} className="mr-1.5" />
+              Template
+            </a>
+          </Button>
+          <Button
+            data-testid={`upload-btn-${kind.key}`}
+            onClick={() => ref.current?.click()}
+            disabled={busy}
+            className="bg-blue-600 hover:bg-blue-700"
+          >
+            <Upload size={14} className="mr-1.5" />
+            {busy ? "Uploading..." : "Upload"}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );
@@ -68,7 +80,19 @@ export default function DataUpload() {
     <div className="space-y-6" data-testid="upload-page">
       <div>
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900" style={{fontFamily:'Manrope'}}>Data Upload</h1>
-        <p className="text-sm text-slate-500 mt-1">Upload Excel files. Duplicates are rejected automatically.</p>
+        <p className="text-sm text-slate-500 mt-1">Download the template, fill in your data, then upload. Duplicate files are rejected automatically.</p>
+      </div>
+
+      <div className="idss-ai-panel p-4" data-testid="upload-order-hint">
+        <div className="text-xs font-semibold uppercase tracking-wider text-blue-700 mb-2">Recommended Upload Order</div>
+        <ol className="text-sm text-slate-700 space-y-1 list-decimal list-inside">
+          <li>Add <b>Factories</b> first via Master Data → Factories (used for MOQ rules)</li>
+          <li>Upload <b>Master Item</b> — the foundation for all analytics</li>
+          <li>Upload <b>Stock Balance</b> — current snapshot (replaces existing stock)</li>
+          <li>Upload <b>Sales History</b> — ideally at least 90 days for accurate ABC & coverage</li>
+          <li>Upload <b>PO Outstanding</b> — for projected stock & incoming PO timeline</li>
+          <li>Add <b>Campaigns</b> via Master Data if you have upcoming promos</li>
+        </ol>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

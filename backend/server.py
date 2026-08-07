@@ -12,7 +12,9 @@ import io
 import uuid
 import logging
 import math
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from fastapi.responses import StreamingResponse
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 ROOT_DIR = Path(__file__).parent
@@ -256,6 +258,142 @@ def parse_excel(content: bytes, kind: str):
         except (ValueError, TypeError, KeyError) as e:
             errors.append(f"Row {i}: {e}")
     return records, errors
+
+# -------------------- EXCEL TEMPLATES --------------------
+TEMPLATE_DEFS = {
+    "master-item": {
+        "sheet": "Master Item",
+        "columns": [
+            ("Item Code", "HVS-A4-70", "Unique SKU code (required)"),
+            ("Description", "HVS Paper A4 70gsm", "Product name / description"),
+            ("Brand", "PaperCo", "Brand name"),
+            ("Category", "Office Paper", "Category / product family"),
+            ("Supplier", "Asia Pulp & Paper", "Supplier name (should match Factory Master)"),
+            ("Factory", "APP", "Factory name (must match Master Factory)"),
+            ("Warehouse", "JKT-01", "Default warehouse code"),
+            ("Unit", "BOX", "Unit of measure (BOX/PCS/RIM)"),
+            ("Weight Per Box", 12.5, "Weight per box in kg"),
+            ("Boxes Per Pallet", 40, "How many boxes fit in 1 pallet"),
+            ("Purchase By Pallet", "TRUE", "TRUE if must order in full pallets"),
+            ("Lead Time", 45, "Standard lead time in days"),
+            ("Safety Stock Days", 7, "Safety stock target in days"),
+            ("Default Buffer Days", 21, "Buffer stock target in days"),
+            ("MOQ Per Pallet", 40, "SKU-level MOQ in boxes"),
+            ("Inventory Value", 850000, "Current inventory value"),
+            ("Status", "Active", "Active / Inactive"),
+        ],
+    },
+    "sales-history": {
+        "sheet": "Sales History",
+        "columns": [
+            ("Date", "2026-01-15", "Sales date (YYYY-MM-DD)"),
+            ("Item Code", "HVS-A4-70", "Must match Master Item code"),
+            ("Customer", "PT Contoh Jaya", "Customer name or code"),
+            ("Sales Qty", 20, "Quantity sold (in Unit)"),
+            ("Sales Value", 4000000, "Sales value in currency"),
+            ("Warehouse", "JKT-01", "Warehouse code"),
+            ("Channel", "Wholesale", "Retail / Wholesale / Online"),
+        ],
+    },
+    "stock-balance": {
+        "sheet": "Stock Balance",
+        "columns": [
+            ("Warehouse", "JKT-01", "Warehouse code"),
+            ("Item Code", "HVS-A4-70", "Must match Master Item code"),
+            ("Available Qty", 500, "Available (ready-to-sell)"),
+            ("Reserved Qty", 50, "Reserved for orders"),
+            ("Blocked Qty", 0, "Blocked / QC hold"),
+            ("Total Qty", 550, "Sum of Available + Reserved + Blocked"),
+            ("Inventory Value", 850000, "Total inventory value at this warehouse"),
+        ],
+    },
+    "po-outstanding": {
+        "sheet": "PO Outstanding",
+        "columns": [
+            ("PO Number", "PO-2401", "Purchase order number"),
+            ("Supplier", "Asia Pulp & Paper", "Supplier name"),
+            ("Factory", "APP", "Factory name"),
+            ("Item Code", "HVS-A4-70", "Must match Master Item code"),
+            ("Qty", 400, "PO quantity"),
+            ("ETA", "2026-02-15", "Estimated Time of Arrival (YYYY-MM-DD)"),
+            ("Status", "Open", "Open / In Transit / Received / Closed"),
+            ("Weight", 5000, "Total weight (kg)"),
+            ("Tonnage", 5, "Total tonnage (ton)"),
+        ],
+    },
+}
+
+def _build_template_xlsx(kind: str) -> bytes:
+    tpl = TEMPLATE_DEFS[kind]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = tpl["sheet"]
+
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    note_fill = PatternFill(start_color="EFF6FF", end_color="EFF6FF", fill_type="solid")
+    note_font = Font(color="475569", italic=True, size=10)
+
+    # Row 1: headers
+    for i, (name, _sample, _note) in enumerate(tpl["columns"], start=1):
+        c = ws.cell(row=1, column=i, value=name)
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = Alignment(horizontal="left", vertical="center")
+
+    # Row 2: notes (grey italic)
+    for i, (_name, _sample, note) in enumerate(tpl["columns"], start=1):
+        c = ws.cell(row=2, column=i, value=f"↑ {note}")
+        c.fill = note_fill
+        c.font = note_font
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+
+    # Row 3: sample values
+    for i, (_name, sample, _note) in enumerate(tpl["columns"], start=1):
+        ws.cell(row=3, column=i, value=sample)
+
+    # Auto width
+    for i, (name, sample, _note) in enumerate(tpl["columns"], start=1):
+        width = max(len(str(name)), len(str(sample))) + 4
+        ws.column_dimensions[chr(64 + i) if i <= 26 else "A"].width = min(width, 32)
+    ws.row_dimensions[2].height = 42
+    ws.freeze_panes = "A4"
+
+    # Instructions sheet
+    info = wb.create_sheet("README")
+    info["A1"] = f"IDSS Template — {tpl['sheet']}"
+    info["A1"].font = Font(bold=True, size=14, color="1D4ED8")
+    info["A3"] = "Instructions:"
+    info["A3"].font = Font(bold=True)
+    tips = [
+        "1. Row 1 contains column headers — DO NOT rename or delete.",
+        "2. Row 2 contains guidance notes — you may delete this row before uploading.",
+        "3. Row 3 is a sample record — replace it with your real data.",
+        "4. Save as .xlsx and upload via the Data Upload page in IDSS.",
+        "5. Item Code must match across Master Item, Stock, Sales, and PO files.",
+        "6. Dates use YYYY-MM-DD format (Excel date cells also accepted).",
+        "7. Duplicate uploads (same file content) are automatically rejected.",
+    ]
+    for i, t in enumerate(tips, start=4):
+        info[f"A{i}"] = t
+    info.column_dimensions["A"].width = 80
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+@api.get("/templates/{kind}")
+async def download_template(kind: str):
+    if kind not in TEMPLATE_DEFS:
+        raise HTTPException(404, f"Unknown template. Available: {list(TEMPLATE_DEFS.keys())}")
+    data = _build_template_xlsx(kind)
+    filename = f"IDSS_Template_{kind.replace('-', '_')}.xlsx"
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 # -------------------- UPLOAD ENDPOINTS --------------------
 VALID_TYPES = list(COLUMN_MAPS.keys())
