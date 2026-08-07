@@ -1,34 +1,91 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap');
+
+:root {
+  --idss-blue: #2563eb;
+  --idss-blue-hover: #1d4ed8;
+  --idss-orange: #f97316;
+  --idss-orange-hover: #ea580c;
+  --idss-bg: #f8fafc;
+  --idss-surface: #ffffff;
+  --idss-border: #e2e8f0;
+  --idss-ai-bg: #eff6ff;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+html, body, #root {
+  background: var(--idss-bg);
+  color: #0f172a;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+h1, h2, h3, h4, h5 { font-family: 'Manrope', sans-serif; letter-spacing: -0.01em; }
+
+.idss-card {
+  background: var(--idss-surface);
+  border: 1px solid var(--idss-border);
+  border-radius: 10px;
 }
 
-.App-link {
-    color: #61dafb;
+.idss-kpi-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #64748b;
 }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+.idss-kpi-value {
+  font-family: 'Manrope', sans-serif;
+  font-weight: 700;
+  color: #0f172a;
+  font-size: 26px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.idss-traffic-red { background: #dc2626; box-shadow: 0 0 10px rgba(220,38,38,0.5); }
+.idss-traffic-orange { background: #ea580c; box-shadow: 0 0 10px rgba(234,88,12,0.5); }
+.idss-traffic-yellow { background: #eab308; box-shadow: 0 0 10px rgba(234,179,8,0.5); }
+.idss-traffic-green { background: #16a34a; box-shadow: 0 0 10px rgba(22,163,74,0.5); }
+
+.idss-ai-panel {
+  background: linear-gradient(180deg, #eff6ff 0%, #ffffff 100%);
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+.idss-ai-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #2563eb 0%, #f97316 100%);
+}
+
+.idss-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
+.idss-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+.idss-scroll::-webkit-scrollbar-track { background: transparent; }
+
+.idss-table-row:hover { background: #f8fafc; }
+
+/* Sidebar */
+.idss-sidebar-item {
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.idss-sidebar-item.active {
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+.idss-sidebar-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  background: #2563eb;
+  border-radius: 0 3px 3px 0;
 }
