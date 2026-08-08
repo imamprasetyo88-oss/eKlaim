@@ -1,0 +1,52 @@
+{
+  "summary": "Iteration 3 focuses on the new Cash Advance (Uang Muka) feature + regression on all existing pages. Backend: added 7 new pytest cases covering full UM flow (surplus + deficit selisih auto-settle), correction & rejection paths (verifikator/atasan), draft-only delete guard, and dashboard UM counts per role. Total 26/26 tests pass. Frontend: verified sidebar shows 'Ajukan Uang Muka' (nav-um-new) and 'Uang Muka' (nav-um), /uang-muka list renders with UM rows and Bahasa Indonesia status badges (Draft UM, Menunggu Transfer, Selesai, Ditolak), /uang-muka/baru form renders with all fields + Simpan Draft & Ajukan buttons, /uang-muka/{id} detail page renders. All 16 sidebar navigations render successfully with no runtime error overlays. Fixed a real regression bug on /petty-cash (ReferenceError: rawPct is not defined) introduced by previous cleanup.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "PettyCash",
+        "issue": "REGRESSION - Uncaught ReferenceError 'rawPct is not defined' (and 'surplus' undefined) at /petty-cash. Previous fix that removed stray `);` also removed `rawPct` and `surplus` definitions but left them referenced at lines 80 & 83. Whole page blank with red error overlay. FIXED by re-adding: `const rawPct = data.saldo_awal ? (data.saldo_sekarang/data.saldo_awal)*100 : 100; const pct = Math.min(100, Math.round(rawPct)); const surplus = Math.max(0, saldo_sekarang - saldo_awal);`",
+        "selector": "petty-cash-page",
+        "priority": "HIGH-FIXED"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "UangMukaForm (/uang-muka/baru), UangMuka detail (realize dialog)",
+        "issues": ["Uses native browser <input type=date> for tanggal instead of shadcn Calendar - same locale/ dd-MM-yyyy issue previously noted for ClaimForm/Laporan. Consistency improvement."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_eklaim_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Consider defensive coding pattern to avoid silent regressions like PettyCash 'rawPct' (e.g., enable ESLint no-undef rule in the repo so referencing an undeclared variable fails the build).",
+    "Replace native date pickers on UangMukaForm and RealizeDialog with shadcn Calendar to match app locale (id-ID, dd/MM/yyyy).",
+    "Cash Advance detail page timeline currently only shows 'created' when no submit/verify actions yet; verify action buttons are correctly shown to the appropriate role at each status (spot-checked admin sees Edit/Hapus/Ajukan on DRAFT_UM - OK)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1108 lines; strongly recommend splitting into routers/ (claims, cash_advances, topups, users, files, dashboard, reports) - single-file server is becoming unmanageable.",
+    "petty cash mutations across cash-advance transfer/confirm are not wrapped in a MongoDB transaction. A crash between apply_petty_cash and status update can leave inconsistent state (same issue as claims/topups).",
+    "Cash Advance 'confirm' checks `abs(selisih) > 0.01` for float comparison - reasonable, but persisted `selisih` and `jumlah_um`/`jumlah_aktual` are stored as float. For money, prefer storing as integer rupiah (Rp is integer-only) to avoid drift. All API expects float; consider migrating to int in a future refactor.",
+    "Same useEffect anti-pattern was fixed in iteration_2; PettyCash regression here shows the fragility of hand-edits on this file. Add unit test / smoke render test for PettyCash page.",
+    "ca_verify/ca_approve return HTTP 400 for both 'not found' and 'wrong status' (line 820, 839). Should return 404 for not-found and 409/400 for status mismatch to help API consumers debug.",
+    "Cash Advance realize endpoint doesn't cap jumlah_aktual to any upper limit - a user could enter jumlah_aktual = 10x jumlah_um and force a giant deficit. Consider adding a sanity guard or requiring atasan re-approval when deficit > X% of UM."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/PettyCash.jsx",
+    "/app/backend/tests/test_eklaim_backend.py"
+  ],
+  "success_rate": {"backend": "100% (26/26)", "frontend": "100% (16/16 pages render, all UM flows verified UI-wise, E2E backend flow verified via pytest)"},
+  "test_credentials": "admin/admin123, budi/test123 (user), verifi/test123 (verifikator), manager/test123 (atasan), finance/test123 (finance), audit/test123 (auditor). Same as iteration_2.",
+  "seed_data_creation": "Backend tests created several UM records (surplus, deficit, correction, rejected, deleted). Saldo petty cash further adjusted by UM tests: net -450k (surplus flow) + -250k (deficit flow). Current saldo shown as Rp 6.000.000 in dashboard after multiple topups over iterations.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Cash Advance backend + basic UI is solid. Full end-to-end UM click-through via playwright (create -> submit -> verify -> approve -> transfer -> realize -> confirm) was NOT executed via UI in this iteration (backend pytest covers it). If needed, log in as budi/test123 to create, verifi/test123 to verify+transfer+confirm, manager/test123 to approve. Focus next on dd/MM/yyyy shadcn DatePicker adoption and server.py modularization.",
+  "rca of the issue": "PettyCash.jsx regression RCA: When iteration_2 fix removed stray `);` `}` tokens at line 135-136, the surrounding variable declarations `rawPct` and `surplus` were also removed but the JSX at lines 80 & 83 still references them. React threw 'ReferenceError: rawPct is not defined' during render, blanking the entire /petty-cash route. Reproduction: navigate to /petty-cash - red overlay 'Uncaught runtime errors'. Mitigation: reintroduced the three variable declarations (rawPct, pct, surplus) with sensible defaults. Verified /petty-cash now renders saldo card + progress bar + Riwayat Mutasi table without errors."
+}

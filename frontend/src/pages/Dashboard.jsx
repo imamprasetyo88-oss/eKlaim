@@ -89,6 +89,11 @@ export default function Dashboard() {
             {c.verifikasi != null && <ActionCard testId="action-verifikasi" to="/verifikasi" count={c.verifikasi} label="Klaim perlu diverifikasi" icon={CheckCircle} />}
             {c.approval != null && <ActionCard testId="action-approval" to="/approval" count={c.approval} label="Klaim perlu di-approve" icon={Stamp} />}
             {c.pembayaran != null && <ActionCard testId="action-pembayaran" to="/pembayaran" count={c.pembayaran} label="Klaim siap dibayar" icon={Coins} />}
+            {c.um_verifikasi != null && <ActionCard testId="action-um-verifikasi" to="/uang-muka" count={c.um_verifikasi} label="Uang muka perlu diverifikasi" icon={CheckCircle} />}
+            {c.um_approval != null && <ActionCard testId="action-um-approval" to="/uang-muka" count={c.um_approval} label="Uang muka perlu di-approve" icon={Stamp} />}
+            {c.um_transfer != null && <ActionCard testId="action-um-transfer" to="/uang-muka" count={c.um_transfer} label="Uang muka perlu ditransfer" icon={Coins} />}
+            {c.um_konfirmasi != null && <ActionCard testId="action-um-konfirmasi" to="/uang-muka" count={c.um_konfirmasi} label="Realisasi UM perlu dikonfirmasi" icon={CheckCircle} />}
+            {c.um_perlu_bukti != null && <ActionCard testId="action-um-bukti" to="/uang-muka" count={c.um_perlu_bukti} label="UM Anda perlu upload bukti" icon={ClockClockwise} />}
             {c.topup != null && <ActionCard testId="action-topup" to="/top-up" count={c.topup} label="Top-up menunggu Anda" icon={ClockClockwise} />}
             {c.perlu_koreksi != null && <ActionCard testId="action-koreksi" to="/klaim" count={c.perlu_koreksi} label="Klaim perlu dikoreksi" icon={ClockClockwise} />}
             {c.diproses != null && <ActionCard testId="action-diproses" to="/klaim" count={c.diproses} label="Klaim sedang diproses" icon={ClockClockwise} />}

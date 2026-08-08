@@ -56,6 +56,15 @@ export const STATUS_LABEL = {
   DIBAYAR: "Selesai",
   MENUNGGU_FINANCE: "Menunggu Finance",
   SELESAI: "Selesai",
+  DRAFT_UM: "Draft UM",
+  MENUNGGU_VERIFIKASI_UM: "Menunggu Verifikasi",
+  PERLU_KOREKSI_UM: "Perlu Koreksi",
+  DITOLAK_UM: "Ditolak",
+  MENUNGGU_APPROVAL_UM: "Menunggu Approval",
+  MENUNGGU_TRANSFER_UM: "Menunggu Transfer",
+  MENUNGGU_BUKTI: "Menunggu Bukti Realisasi",
+  MENUNGGU_KONFIRMASI_UM: "Menunggu Konfirmasi",
+  SELESAI_UM: "Selesai",
 };
 
 export const ROLE_LABEL = {

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useAuth, can } from "@/lib/auth";
 import {
   House, Receipt, CheckCircle, Stamp, Wallet, ArrowsClockwise,
-  Users, TagChevron, ChartBar, ClipboardText, Gear, SignOut, ListMagnifyingGlass, Coins
+  Users, TagChevron, ChartBar, ClipboardText, Gear, SignOut, ListMagnifyingGlass, Coins, HandCoins
 } from "@phosphor-icons/react";
 import { ROLE_LABEL } from "@/lib/api";
 
@@ -11,6 +11,8 @@ const ALL = [
   { to: "/", label: "Dashboard", icon: House, tid: "nav-dashboard", roles: "*" },
   { to: "/klaim/baru", label: "Ajukan Klaim", icon: Receipt, tid: "nav-claim-new", roles: ["user", "admin", "verifikator", "atasan", "finance"] },
   { to: "/klaim", label: "Klaim Saya", icon: ClipboardText, tid: "nav-my-claims", roles: ["user", "admin", "auditor", "verifikator", "atasan", "finance"] },
+  { to: "/uang-muka/baru", label: "Ajukan Uang Muka", icon: HandCoins, tid: "nav-um-new", roles: ["user", "admin", "verifikator", "atasan", "finance"] },
+  { to: "/uang-muka", label: "Uang Muka", icon: HandCoins, tid: "nav-um", roles: "*" },
   { to: "/verifikasi", label: "Verifikasi", icon: CheckCircle, tid: "nav-verifikasi", roles: ["verifikator", "admin", "auditor"] },
   { to: "/approval", label: "Approval Atasan", icon: Stamp, tid: "nav-approval", roles: ["atasan", "admin", "auditor"] },
   { to: "/pembayaran", label: "Pembayaran", icon: Coins, tid: "nav-pembayaran", roles: ["verifikator", "admin", "auditor"] },

@@ -19,6 +19,9 @@ import Rekonsiliasi from "@/pages/Rekonsiliasi";
 import AuditTrail from "@/pages/AuditTrail";
 import Laporan from "@/pages/Laporan";
 import Pengaturan from "@/pages/Pengaturan";
+import UangMuka from "@/pages/UangMuka";
+import UangMukaForm from "@/pages/UangMukaForm";
+import UangMukaDetail from "@/pages/UangMukaDetail";
 
 function Private({ children }) {
   const { user, loading } = useAuth();
@@ -43,6 +46,10 @@ export default function App() {
             <Route path="/verifikasi" element={<Verifikasi />} />
             <Route path="/approval" element={<Approval />} />
             <Route path="/pembayaran" element={<Pembayaran />} />
+            <Route path="/uang-muka" element={<UangMuka />} />
+            <Route path="/uang-muka/baru" element={<UangMukaForm />} />
+            <Route path="/uang-muka/:id" element={<UangMukaDetail />} />
+            <Route path="/uang-muka/:id/edit" element={<UangMukaForm />} />
             <Route path="/petty-cash" element={<PettyCash />} />
             <Route path="/top-up" element={<TopUp />} />
             <Route path="/rekonsiliasi" element={<Rekonsiliasi />} />

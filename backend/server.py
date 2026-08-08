@@ -194,6 +194,23 @@ class TopUpApprove(BaseModel):
 class PettyCashInit(BaseModel):
     saldo_awal: float
 
+class CashAdvanceCreate(BaseModel):
+    category_id: str
+    tanggal: str
+    deskripsi: str
+    tujuan: Optional[str] = ""
+    jumlah_um: float
+
+class CashAdvanceAction(BaseModel):
+    catatan: Optional[str] = ""
+    transfer_proof_ids: List[str] = []
+
+class CashAdvanceRealize(BaseModel):
+    jumlah_aktual: float
+    receipt_ids: List[str]
+    catatan: Optional[str] = ""
+    settle_proof_ids: List[str] = []
+
 # -------------------- AUTH --------------------
 @api.post("/auth/login")
 async def login(body: LoginReq):
@@ -703,6 +720,213 @@ async def reject_topup(tid: str, body: TopUpApprove, user=Depends(require_roles(
     await audit(user, "reject_topup", "topup", tid)
     return await db.topups.find_one({"id": tid}, {"_id": 0})
 
+# -------------------- CASH ADVANCE (UANG MUKA) --------------------
+CA_STATUS = ["DRAFT_UM", "MENUNGGU_VERIFIKASI_UM", "PERLU_KOREKSI_UM", "DITOLAK_UM",
+             "MENUNGGU_APPROVAL_UM", "MENUNGGU_TRANSFER_UM", "MENUNGGU_BUKTI",
+             "MENUNGGU_KONFIRMASI_UM", "SELESAI_UM"]
+
+async def _ca_to_public(ca):
+    ca = {k: v for k, v in ca.items() if k != "_id"}
+    file_ids = list((ca.get("transfer_proof_ids") or []) + (ca.get("receipt_ids") or []) + (ca.get("settle_proof_ids") or []))
+    fmap = {}
+    if file_ids:
+        files = await db.files.find({"id": {"$in": file_ids}}, {"_id": 0, "storage_path": 0}).to_list(50)
+        fmap = {f["id"]: f for f in files}
+    ca["transfer_proofs"] = [fmap.get(i) for i in (ca.get("transfer_proof_ids") or []) if fmap.get(i)]
+    ca["receipts"] = [fmap.get(i) for i in (ca.get("receipt_ids") or []) if fmap.get(i)]
+    ca["settle_proofs"] = [fmap.get(i) for i in (ca.get("settle_proof_ids") or []) if fmap.get(i)]
+    return ca
+
+def _ca_push(ca, actor, action, note=""):
+    tl = ca.get("timeline") or []
+    tl.append({"action": action, "actor_id": actor["id"], "actor_name": actor.get("name") or actor["username"], "actor_role": actor["role"], "note": note, "at": now_iso()})
+    return tl
+
+@api.post("/cash-advances")
+async def ca_create(body: CashAdvanceCreate, user=Depends(current_user)):
+    cat = await db.categories.find_one({"id": body.category_id})
+    if not cat:
+        raise HTTPException(400, "Kategori tidak ditemukan")
+    if body.jumlah_um <= 0:
+        raise HTTPException(400, "Jumlah uang muka harus lebih dari 0")
+    code = await _gen_code("UM")
+    doc = {
+        "id": str(uuid.uuid4()), "code": code,
+        "user_id": user["id"], "user_name": user.get("name") or user["username"],
+        "category_id": cat["id"], "category_name": cat["name"], "category_code": cat["code"],
+        "tanggal": body.tanggal, "deskripsi": body.deskripsi, "tujuan": body.tujuan or "",
+        "jumlah_um": float(body.jumlah_um), "jumlah_aktual": None, "selisih": None,
+        "status": "DRAFT_UM",
+        "transfer_proof_ids": [], "receipt_ids": [], "settle_proof_ids": [],
+        "timeline": [], "created_at": now_iso(), "updated_at": now_iso(),
+    }
+    doc["timeline"] = _ca_push(doc, user, "created")
+    await db.cash_advances.insert_one(doc)
+    await audit(user, "create_cash_advance", "cash_advance", doc["id"], {"code": code, "jumlah": doc["jumlah_um"]})
+    return await _ca_to_public(doc)
+
+@api.get("/cash-advances")
+async def ca_list(status: Optional[str] = None, mine: Optional[bool] = False, user=Depends(current_user)):
+    q = {}
+    if mine or user["role"] == "user":
+        q["user_id"] = user["id"]
+    if status:
+        q["status"] = status.upper()
+    docs = await db.cash_advances.find(q).sort("created_at", -1).limit(500).to_list(500)
+    return [await _ca_to_public(d) for d in docs]
+
+@api.get("/cash-advances/{cid}")
+async def ca_get(cid: str, user=Depends(current_user)):
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca:
+        raise HTTPException(404, "Uang Muka tidak ditemukan")
+    if user["role"] == "user" and ca["user_id"] != user["id"]:
+        raise HTTPException(403, "Bukan milik Anda")
+    return await _ca_to_public(ca)
+
+@api.put("/cash-advances/{cid}")
+async def ca_update(cid: str, body: CashAdvanceCreate, user=Depends(current_user)):
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca:
+        raise HTTPException(404, "Tidak ditemukan")
+    if ca["user_id"] != user["id"]:
+        raise HTTPException(403, "Bukan milik Anda")
+    if ca["status"] not in ("DRAFT_UM", "PERLU_KOREKSI_UM"):
+        raise HTTPException(400, "Tidak bisa diedit pada status saat ini")
+    cat = await db.categories.find_one({"id": body.category_id})
+    if not cat:
+        raise HTTPException(400, "Kategori tidak ditemukan")
+    upd = {"category_id": cat["id"], "category_name": cat["name"], "category_code": cat["code"],
+           "tanggal": body.tanggal, "deskripsi": body.deskripsi, "tujuan": body.tujuan or "",
+           "jumlah_um": float(body.jumlah_um), "updated_at": now_iso()}
+    await db.cash_advances.update_one({"id": cid}, {"$set": upd})
+    await audit(user, "update_cash_advance", "cash_advance", cid)
+    return await _ca_to_public(await db.cash_advances.find_one({"id": cid}))
+
+@api.post("/cash-advances/{cid}/submit")
+async def ca_submit(cid: str, user=Depends(current_user)):
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca: raise HTTPException(404, "Tidak ditemukan")
+    if ca["user_id"] != user["id"]: raise HTTPException(403, "Bukan milik Anda")
+    if ca["status"] not in ("DRAFT_UM", "PERLU_KOREKSI_UM"): raise HTTPException(400, "Status tidak sesuai")
+    tl = _ca_push(ca, user, "submitted")
+    await db.cash_advances.update_one({"id": cid}, {"$set": {"status": "MENUNGGU_VERIFIKASI_UM", "timeline": tl, "submitted_at": now_iso(), "updated_at": now_iso()}})
+    await audit(user, "submit_cash_advance", "cash_advance", cid)
+    return await _ca_to_public(await db.cash_advances.find_one({"id": cid}))
+
+@api.post("/cash-advances/{cid}/verify")
+async def ca_verify(cid: str, body: CashAdvanceAction, decision: str = Query(...), user=Depends(require_roles("verifikator"))):
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca or ca["status"] != "MENUNGGU_VERIFIKASI_UM":
+        raise HTTPException(400, "Status tidak sesuai")
+    dec = decision.lower()
+    if dec == "approve":
+        new_status = "MENUNGGU_APPROVAL_UM"; action = "verified"
+    elif dec == "correction":
+        new_status = "PERLU_KOREKSI_UM"; action = "returned_for_correction"
+    elif dec == "reject":
+        new_status = "DITOLAK_UM"; action = "rejected_by_verifikator"
+    else:
+        raise HTTPException(400, "decision harus approve/correction/reject")
+    tl = _ca_push(ca, user, action, body.catatan or "")
+    await db.cash_advances.update_one({"id": cid}, {"$set": {"status": new_status, "timeline": tl, "verifikator_note": body.catatan or "", "verified_at": now_iso(), "updated_at": now_iso()}})
+    await audit(user, f"ca_verify_{dec}", "cash_advance", cid)
+    return await _ca_to_public(await db.cash_advances.find_one({"id": cid}))
+
+@api.post("/cash-advances/{cid}/approve")
+async def ca_approve(cid: str, body: CashAdvanceAction, decision: str = Query(...), user=Depends(require_roles("atasan"))):
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca or ca["status"] != "MENUNGGU_APPROVAL_UM":
+        raise HTTPException(400, "Status tidak sesuai")
+    dec = decision.lower()
+    if dec == "approve":
+        new_status = "MENUNGGU_TRANSFER_UM"; action = "approved_by_atasan"
+    elif dec == "reject":
+        new_status = "DITOLAK_UM"; action = "rejected_by_atasan"
+    else:
+        raise HTTPException(400, "decision harus approve/reject")
+    tl = _ca_push(ca, user, action, body.catatan or "")
+    await db.cash_advances.update_one({"id": cid}, {"$set": {"status": new_status, "timeline": tl, "atasan_note": body.catatan or "", "approved_at": now_iso(), "updated_at": now_iso()}})
+    await audit(user, f"ca_approve_{dec}", "cash_advance", cid)
+    return await _ca_to_public(await db.cash_advances.find_one({"id": cid}))
+
+@api.post("/cash-advances/{cid}/transfer")
+async def ca_transfer(cid: str, body: CashAdvanceAction, user=Depends(require_roles("verifikator"))):
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca: raise HTTPException(404, "Tidak ditemukan")
+    if ca["status"] != "MENUNGGU_TRANSFER_UM": raise HTTPException(400, "Status tidak sesuai")
+    if not body.transfer_proof_ids: raise HTTPException(400, "Bukti transfer wajib diunggah")
+    wallet = await get_petty_cash()
+    if wallet["saldo_sekarang"] < ca["jumlah_um"]:
+        raise HTTPException(400, f"Saldo petty cash tidak cukup (Rp {wallet['saldo_sekarang']:,.0f}). Request top-up dulu.")
+    tl = _ca_push(ca, user, "transferred", body.catatan or "")
+    await db.cash_advances.update_one({"id": cid}, {"$set": {
+        "status": "MENUNGGU_BUKTI", "timeline": tl,
+        "transfer_proof_ids": body.transfer_proof_ids,
+        "transfer_note": body.catatan or "", "transferred_at": now_iso(), "updated_at": now_iso(),
+    }})
+    await apply_petty_cash(-ca["jumlah_um"], user, "OUT", cid, f"Transfer Uang Muka {ca['code']} ke {ca['user_name']}")
+    await audit(user, "ca_transfer", "cash_advance", cid, {"jumlah": ca["jumlah_um"]})
+    return await _ca_to_public(await db.cash_advances.find_one({"id": cid}))
+
+@api.post("/cash-advances/{cid}/realize")
+async def ca_realize(cid: str, body: CashAdvanceRealize, user=Depends(current_user)):
+    """User upload bukti aktual + jumlah aktual."""
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca: raise HTTPException(404, "Tidak ditemukan")
+    if ca["user_id"] != user["id"]: raise HTTPException(403, "Bukan milik Anda")
+    if ca["status"] != "MENUNGGU_BUKTI": raise HTTPException(400, "Status tidak sesuai")
+    if not body.receipt_ids: raise HTTPException(400, "Bukti pembayaran wajib diunggah")
+    if body.jumlah_aktual < 0: raise HTTPException(400, "Jumlah aktual tidak valid")
+    selisih = ca["jumlah_um"] - float(body.jumlah_aktual)  # positif = sisa dikembalikan; negatif = kurang, verifikator bayar tambahan
+    tl = _ca_push(ca, user, "realized", body.catatan or "")
+    await db.cash_advances.update_one({"id": cid}, {"$set": {
+        "status": "MENUNGGU_KONFIRMASI_UM", "timeline": tl,
+        "jumlah_aktual": float(body.jumlah_aktual), "selisih": selisih,
+        "receipt_ids": body.receipt_ids,
+        "settle_proof_ids": body.settle_proof_ids or [],
+        "realize_note": body.catatan or "", "realized_at": now_iso(), "updated_at": now_iso(),
+    }})
+    await audit(user, "ca_realize", "cash_advance", cid, {"jumlah_aktual": body.jumlah_aktual, "selisih": selisih})
+    return await _ca_to_public(await db.cash_advances.find_one({"id": cid}))
+
+@api.post("/cash-advances/{cid}/confirm")
+async def ca_confirm(cid: str, body: CashAdvanceAction, user=Depends(require_roles("verifikator"))):
+    """Verifikator konfirmasi realisasi & auto-settle petty cash."""
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca: raise HTTPException(404, "Tidak ditemukan")
+    if ca["status"] != "MENUNGGU_KONFIRMASI_UM": raise HTTPException(400, "Status tidak sesuai")
+    selisih = ca.get("selisih", 0) or 0
+    # selisih positif = sisa dikembalikan user ke petty cash (masuk +)
+    # selisih negatif = petty cash bayar kekurangan (keluar -)
+    if abs(selisih) > 0.01:
+        if selisih > 0:
+            desc = f"Pengembalian sisa UM {ca['code']} dari {ca['user_name']}"
+            await apply_petty_cash(selisih, user, "IN", cid, desc)
+        else:
+            wallet = await get_petty_cash()
+            if wallet["saldo_sekarang"] < abs(selisih):
+                raise HTTPException(400, f"Saldo tidak cukup untuk bayar kekurangan (butuh Rp {abs(selisih):,.0f}). Request top-up dulu.")
+            desc = f"Tambahan realisasi UM {ca['code']} untuk {ca['user_name']}"
+            await apply_petty_cash(selisih, user, "OUT", cid, desc)
+    tl = _ca_push(ca, user, "confirmed_settlement", body.catatan or "")
+    await db.cash_advances.update_one({"id": cid}, {"$set": {
+        "status": "SELESAI_UM", "timeline": tl,
+        "confirm_note": body.catatan or "", "confirmed_at": now_iso(), "updated_at": now_iso(),
+    }})
+    await audit(user, "ca_confirm", "cash_advance", cid, {"selisih": selisih})
+    return await _ca_to_public(await db.cash_advances.find_one({"id": cid}))
+
+@api.delete("/cash-advances/{cid}")
+async def ca_delete(cid: str, user=Depends(current_user)):
+    ca = await db.cash_advances.find_one({"id": cid})
+    if not ca: raise HTTPException(404, "Tidak ditemukan")
+    if ca["user_id"] != user["id"] and user["role"] != "admin": raise HTTPException(403, "Bukan milik Anda")
+    if ca["status"] != "DRAFT_UM": raise HTTPException(400, "Hanya draft yang bisa dihapus")
+    await db.cash_advances.delete_one({"id": cid})
+    await audit(user, "delete_cash_advance", "cash_advance", cid)
+    return {"ok": True}
+
 # -------------------- DASHBOARD --------------------
 @api.get("/dashboard")
 async def dashboard(user=Depends(current_user)):
@@ -713,8 +937,12 @@ async def dashboard(user=Depends(current_user)):
     if role in ("verifikator", "admin", "auditor"):
         counts["verifikasi"] = await db.claims.count_documents({"status": "DIAJUKAN"})
         counts["pembayaran"] = await db.claims.count_documents({"status": "MENUNGGU_PEMBAYARAN"})
+        counts["um_verifikasi"] = await db.cash_advances.count_documents({"status": "MENUNGGU_VERIFIKASI_UM"})
+        counts["um_transfer"] = await db.cash_advances.count_documents({"status": "MENUNGGU_TRANSFER_UM"})
+        counts["um_konfirmasi"] = await db.cash_advances.count_documents({"status": "MENUNGGU_KONFIRMASI_UM"})
     if role in ("atasan", "admin", "auditor"):
         counts["approval"] = await db.claims.count_documents({"status": "MENUNGGU_APPROVAL"})
+        counts["um_approval"] = await db.cash_advances.count_documents({"status": "MENUNGGU_APPROVAL_UM"})
     if role in ("finance", "admin", "auditor"):
         counts["topup"] = await db.topups.count_documents({"status": "MENUNGGU_FINANCE"})
     if role == "user":
@@ -722,6 +950,8 @@ async def dashboard(user=Depends(current_user)):
         counts["perlu_koreksi"] = await db.claims.count_documents({"user_id": user["id"], "status": "PERLU_KOREKSI"})
         counts["diproses"] = await db.claims.count_documents({"user_id": user["id"], "status": {"$in": ["DIAJUKAN", "MENUNGGU_APPROVAL", "MENUNGGU_PEMBAYARAN"]}})
         counts["selesai"] = await db.claims.count_documents({"user_id": user["id"], "status": "DIBAYAR"})
+        counts["um_perlu_bukti"] = await db.cash_advances.count_documents({"user_id": user["id"], "status": "MENUNGGU_BUKTI"})
+        counts["um_perlu_koreksi"] = await db.cash_advances.count_documents({"user_id": user["id"], "status": "PERLU_KOREKSI_UM"})
 
     # KPI umum
     total_claims = await db.claims.count_documents({})

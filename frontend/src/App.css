@@ -82,6 +82,15 @@ h1, h2, h3, h4, h5 {
 .status-DITOLAK { background: #fee2e2; color: #991b1b; }
 .status-MENUNGGU_FINANCE { background: #dbeafe; color: #1e40af; }
 .status-SELESAI { background: #dcfce7; color: #166534; }
+.status-DRAFT_UM { background: #f1f5f9; color: #475569; }
+.status-MENUNGGU_VERIFIKASI_UM { background: #dbeafe; color: #1e40af; }
+.status-PERLU_KOREKSI_UM { background: #fef3c7; color: #92400e; }
+.status-DITOLAK_UM { background: #fee2e2; color: #991b1b; }
+.status-MENUNGGU_APPROVAL_UM { background: #ede9fe; color: #5b21b6; }
+.status-MENUNGGU_TRANSFER_UM { background: #ffedd5; color: #9a3412; }
+.status-MENUNGGU_BUKTI { background: #ccfbf1; color: #115e59; }
+.status-MENUNGGU_KONFIRMASI_UM { background: #ede9fe; color: #5b21b6; }
+.status-SELESAI_UM { background: #dcfce7; color: #166534; }
 
 .kpi-label {
   font-size: 11px;

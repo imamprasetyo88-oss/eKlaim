@@ -305,3 +305,228 @@ def test_reports_claims():
     r = requests.get(f"{API}/reports/claims", headers=_auth_headers(S["admin_token"]))
     assert r.status_code == 200
     assert isinstance(r.json(), list)
+
+
+# ---------- CASH ADVANCE (UANG MUKA) FULL FLOW ----------
+def _upload_png(token, name="um.png"):
+    up = requests.post(f"{API}/files/upload",
+                       headers=_auth_headers(token),
+                       files={"file": (name, _make_png_bytes(), "image/png")})
+    assert up.status_code == 200, up.text
+    return up.json()["id"]
+
+
+def test_ca_full_flow_surplus():
+    """User Rp 500k UM, actual Rp 450k -> selisih +50k returned to petty cash."""
+    # baseline saldo
+    r = requests.get(f"{API}/petty-cash", headers=_auth_headers(S["verifikator_token"]))
+    saldo0 = r.json()["saldo_sekarang"]
+
+    # 1. USER creates cash advance
+    payload = {
+        "category_id": S["category_id"],
+        "tanggal": "2026-01-20",
+        "deskripsi": "TEST_ UM belanja ATK kantor",
+        "tujuan": "Ace Hardware",
+        "jumlah_um": 500000,
+    }
+    r = requests.post(f"{API}/cash-advances", json=payload,
+                      headers=_auth_headers(S["user_token"]))
+    assert r.status_code == 200, r.text
+    ca = r.json()
+    assert ca["status"] == "DRAFT_UM"
+    assert ca["code"].startswith("UM-")
+    assert ca["jumlah_um"] == 500000
+    cid = ca["id"]
+    S["ca_id"] = cid
+
+    # 2. jumlah_um must be > 0
+    bad = dict(payload)
+    bad["jumlah_um"] = 0
+    br = requests.post(f"{API}/cash-advances", json=bad,
+                      headers=_auth_headers(S["user_token"]))
+    assert br.status_code == 400
+
+    # 3. Submit
+    r = requests.post(f"{API}/cash-advances/{cid}/submit",
+                      headers=_auth_headers(S["user_token"]))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "MENUNGGU_VERIFIKASI_UM"
+
+    # 4. Verifikator approve
+    r = requests.post(f"{API}/cash-advances/{cid}/verify?decision=approve",
+                      json={"catatan": "OK"},
+                      headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "MENUNGGU_APPROVAL_UM"
+
+    # 5. Atasan approve
+    r = requests.post(f"{API}/cash-advances/{cid}/approve?decision=approve",
+                      json={"catatan": "setuju"},
+                      headers=_auth_headers(S["atasan_token"]))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "MENUNGGU_TRANSFER_UM"
+
+    # 6. Verifikator transfer requires proof
+    r = requests.post(f"{API}/cash-advances/{cid}/transfer",
+                      json={"catatan": "tf", "transfer_proof_ids": []},
+                      headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 400  # bukti wajib
+
+    proof_id = _upload_png(S["verifikator_token"], "um_tf.png")
+    r = requests.post(f"{API}/cash-advances/{cid}/transfer",
+                      json={"catatan": "tf bca", "transfer_proof_ids": [proof_id]},
+                      headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "MENUNGGU_BUKTI"
+
+    r = requests.get(f"{API}/petty-cash", headers=_auth_headers(S["verifikator_token"]))
+    saldo_after_transfer = r.json()["saldo_sekarang"]
+    assert saldo_after_transfer == saldo0 - 500000, f"expected {saldo0-500000}, got {saldo_after_transfer}"
+
+    # 7. User realize w/ jumlah_aktual 450000 -> selisih +50000
+    receipt_id = _upload_png(S["user_token"], "um_r.png")
+    r = requests.post(f"{API}/cash-advances/{cid}/realize",
+                      json={"jumlah_aktual": 450000, "receipt_ids": [receipt_id], "catatan": "sisa 50rb"},
+                      headers=_auth_headers(S["user_token"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "MENUNGGU_KONFIRMASI_UM"
+    assert body["jumlah_aktual"] == 450000
+    assert body["selisih"] == 50000
+
+    # 8. Verifikator confirm -> selisih +50k back to petty cash
+    r = requests.post(f"{API}/cash-advances/{cid}/confirm",
+                      json={"catatan": "ok"},
+                      headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "SELESAI_UM"
+
+    r = requests.get(f"{API}/petty-cash", headers=_auth_headers(S["verifikator_token"]))
+    saldo_final = r.json()["saldo_sekarang"]
+    # net effect: -500k + 50k = -450k
+    assert saldo_final == saldo0 - 450000, f"expected {saldo0-450000}, got {saldo_final}"
+
+
+def test_ca_deficit_flow():
+    """UM 200k, actual 250k -> selisih -50k, petty cash pays extra 50k."""
+    r = requests.get(f"{API}/petty-cash", headers=_auth_headers(S["verifikator_token"]))
+    saldo0 = r.json()["saldo_sekarang"]
+
+    payload = {
+        "category_id": S["category_id"],
+        "tanggal": "2026-01-21",
+        "deskripsi": "TEST_ UM deficit",
+        "tujuan": "warung",
+        "jumlah_um": 200000,
+    }
+    r = requests.post(f"{API}/cash-advances", json=payload,
+                      headers=_auth_headers(S["user_token"]))
+    cid = r.json()["id"]
+    requests.post(f"{API}/cash-advances/{cid}/submit", headers=_auth_headers(S["user_token"]))
+    requests.post(f"{API}/cash-advances/{cid}/verify?decision=approve",
+                  json={}, headers=_auth_headers(S["verifikator_token"]))
+    requests.post(f"{API}/cash-advances/{cid}/approve?decision=approve",
+                  json={}, headers=_auth_headers(S["atasan_token"]))
+    pf = _upload_png(S["verifikator_token"], "d_tf.png")
+    requests.post(f"{API}/cash-advances/{cid}/transfer",
+                  json={"transfer_proof_ids": [pf]},
+                  headers=_auth_headers(S["verifikator_token"]))
+    rc = _upload_png(S["user_token"], "d_r.png")
+    r = requests.post(f"{API}/cash-advances/{cid}/realize",
+                     json={"jumlah_aktual": 250000, "receipt_ids": [rc]},
+                     headers=_auth_headers(S["user_token"]))
+    assert r.status_code == 200
+    assert r.json()["selisih"] == -50000
+
+    r = requests.post(f"{API}/cash-advances/{cid}/confirm", json={},
+                      headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 200, r.text
+
+    r = requests.get(f"{API}/petty-cash", headers=_auth_headers(S["verifikator_token"]))
+    saldo_final = r.json()["saldo_sekarang"]
+    # -200k transfer + -50k extra = -250k
+    assert saldo_final == saldo0 - 250000, f"expected {saldo0-250000}, got {saldo_final}"
+
+
+def test_ca_correction_and_reject():
+    payload = {"category_id": S["category_id"], "tanggal": "2026-01-22",
+               "deskripsi": "TEST_ correction", "jumlah_um": 100000}
+    r = requests.post(f"{API}/cash-advances", json=payload,
+                      headers=_auth_headers(S["user_token"]))
+    cid = r.json()["id"]
+    requests.post(f"{API}/cash-advances/{cid}/submit", headers=_auth_headers(S["user_token"]))
+    r = requests.post(f"{API}/cash-advances/{cid}/verify?decision=correction",
+                      json={"catatan": "kurang detail"},
+                      headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 200
+    assert r.json()["status"] == "PERLU_KOREKSI_UM"
+
+    # user resubmits
+    requests.post(f"{API}/cash-advances/{cid}/submit", headers=_auth_headers(S["user_token"]))
+    r = requests.post(f"{API}/cash-advances/{cid}/verify?decision=reject",
+                      json={"catatan": "tidak layak"},
+                      headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 200
+    assert r.json()["status"] == "DITOLAK_UM"
+
+
+def test_ca_atasan_reject():
+    payload = {"category_id": S["category_id"], "tanggal": "2026-01-22",
+               "deskripsi": "TEST_ atasan reject", "jumlah_um": 100000}
+    r = requests.post(f"{API}/cash-advances", json=payload,
+                      headers=_auth_headers(S["user_token"]))
+    cid = r.json()["id"]
+    requests.post(f"{API}/cash-advances/{cid}/submit", headers=_auth_headers(S["user_token"]))
+    requests.post(f"{API}/cash-advances/{cid}/verify?decision=approve",
+                  json={}, headers=_auth_headers(S["verifikator_token"]))
+    r = requests.post(f"{API}/cash-advances/{cid}/approve?decision=reject",
+                     json={"catatan": "budget nggak ada"},
+                     headers=_auth_headers(S["atasan_token"]))
+    assert r.status_code == 200
+    assert r.json()["status"] == "DITOLAK_UM"
+
+
+def test_ca_delete_draft_only():
+    payload = {"category_id": S["category_id"], "tanggal": "2026-01-22",
+               "deskripsi": "TEST_ delete draft", "jumlah_um": 10000}
+    r = requests.post(f"{API}/cash-advances", json=payload,
+                      headers=_auth_headers(S["user_token"]))
+    cid = r.json()["id"]
+    # owner can delete DRAFT_UM
+    r = requests.delete(f"{API}/cash-advances/{cid}",
+                       headers=_auth_headers(S["user_token"]))
+    assert r.status_code == 200
+
+    # Cannot delete after submit
+    r = requests.post(f"{API}/cash-advances", json=payload,
+                      headers=_auth_headers(S["user_token"]))
+    cid2 = r.json()["id"]
+    requests.post(f"{API}/cash-advances/{cid2}/submit", headers=_auth_headers(S["user_token"]))
+    r = requests.delete(f"{API}/cash-advances/{cid2}",
+                       headers=_auth_headers(S["user_token"]))
+    assert r.status_code == 400
+
+    # Non-owner (other user) cannot delete
+    r = requests.post(f"{API}/cash-advances", json=payload,
+                      headers=_auth_headers(S["user_token"]))
+    cid3 = r.json()["id"]
+    r = requests.delete(f"{API}/cash-advances/{cid3}",
+                        headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 403
+
+
+def test_dashboard_um_counts_present():
+    r = requests.get(f"{API}/dashboard", headers=_auth_headers(S["verifikator_token"]))
+    assert r.status_code == 200
+    counts = r.json()["counts"]
+    for k in ("um_verifikasi", "um_transfer", "um_konfirmasi"):
+        assert k in counts, f"missing {k}: {counts}"
+
+    r = requests.get(f"{API}/dashboard", headers=_auth_headers(S["atasan_token"]))
+    counts = r.json()["counts"]
+    assert "um_approval" in counts
+
+    r = requests.get(f"{API}/dashboard", headers=_auth_headers(S["user_token"]))
+    counts = r.json()["counts"]
+    assert "um_perlu_bukti" in counts

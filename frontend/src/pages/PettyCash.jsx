@@ -32,7 +32,9 @@ export default function PettyCash() {
   };
 
   if (!data) return <div className="text-slate-500">Memuat...</div>;
-  const pct = data.saldo_awal ? Math.round((data.saldo_sekarang / data.saldo_awal) * 100) : 100;
+  const rawPct = data.saldo_awal ? (data.saldo_sekarang / data.saldo_awal) * 100 : 100;
+  const pct = Math.min(100, Math.round(rawPct));
+  const surplus = Math.max(0, (data.saldo_sekarang || 0) - (data.saldo_awal || 0));
 
   return (
     <div className="space-y-6" data-testid="petty-cash-page">
