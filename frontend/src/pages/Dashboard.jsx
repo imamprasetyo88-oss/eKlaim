@@ -47,7 +47,9 @@ export default function Dashboard() {
   const w = data.wallet || {};
   const k = data.kpi || {};
   const c = data.counts || {};
-  const pct = w.saldo_awal ? Math.round((w.saldo_sekarang / w.saldo_awal) * 100) : 100;
+  const rawPct = w.saldo_awal ? (w.saldo_sekarang / w.saldo_awal) * 100 : 100;
+  const pct = Math.min(100, Math.max(0, rawPct));
+  const surplus = w.saldo_sekarang > w.saldo_awal ? w.saldo_sekarang - w.saldo_awal : 0;
 
   return (
     <div className="space-y-6" data-testid="dashboard-page">
@@ -68,9 +70,11 @@ export default function Dashboard() {
             <div className="kpi-value tabular-nums mt-2 text-slate-900" style={{fontSize:'36px'}}>{fmtRp(w.saldo_sekarang)}</div>
             <div className="text-xs text-slate-500 mt-2">dari saldo awal <span className="tabular-nums font-semibold">{fmtRp(w.saldo_awal)}</span></div>
             <div className="mt-3 h-2 bg-slate-100 rounded-full overflow-hidden">
-              <div className={`h-full rounded-full ${pct < 30 ? "bg-red-500" : pct < 60 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+              <div className={`h-full rounded-full ${rawPct < 30 ? "bg-red-500" : rawPct < 60 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${pct}%` }} />
             </div>
-            <div className="mt-1 text-xs text-slate-500 tabular-nums">{pct}% dari saldo awal</div>
+            <div className="mt-1 text-xs text-slate-500 tabular-nums">
+              {surplus > 0 ? <>Utuh + surplus <span className="text-emerald-700 font-semibold">{fmtRp(surplus)}</span></> : <>{Math.round(rawPct)}% dari saldo awal</>}
+            </div>
           </div>
         </div>
         <Kpi testId="kpi-total-claims" label="Total Klaim" value={k.total_claims || 0} icon={Receipt} sub="Semua status" />

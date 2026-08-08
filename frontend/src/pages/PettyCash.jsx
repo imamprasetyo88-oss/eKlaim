@@ -77,9 +77,11 @@ export default function PettyCash() {
             <div className="kpi-value mt-2 tabular-nums" style={{fontSize:'42px'}}>{fmtRp(data.saldo_sekarang)}</div>
             <div className="text-xs text-slate-500 mt-2">dari saldo awal <span className="tabular-nums font-semibold">{fmtRp(data.saldo_awal)}</span></div>
             <div className="mt-4 h-3 bg-slate-100 rounded-full overflow-hidden">
-              <div className={`h-full rounded-full transition-all ${pct < 30 ? "bg-red-500" : pct < 60 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+              <div className={`h-full rounded-full transition-all ${rawPct < 30 ? "bg-red-500" : rawPct < 60 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${pct}%` }} />
             </div>
-            <div className="mt-1 text-xs text-slate-500 tabular-nums">{pct}% dari saldo awal</div>
+            <div className="mt-1 text-xs text-slate-500 tabular-nums">
+              {surplus > 0 ? <>Utuh + surplus <span className="text-emerald-700 font-semibold">{fmtRp(surplus)}</span></> : <>{Math.round(rawPct)}% dari saldo awal</>}
+            </div>
           </div>
         </div>
         <div className="lyra-card p-6">
@@ -129,4 +131,6 @@ export default function PettyCash() {
       </div>
     </div>
   );
+}
+);
 }
