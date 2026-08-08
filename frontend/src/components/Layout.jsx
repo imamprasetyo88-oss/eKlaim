@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useAuth, can } from "@/lib/auth";
 import {
   House, Receipt, CheckCircle, Stamp, Wallet, ArrowsClockwise,
-  Users, TagChevron, ChartBar, ClipboardText, Gear, SignOut, ListMagnifyingGlass, Coins, HandCoins
+  Users, TagChevron, ChartBar, ClipboardText, Gear, SignOut, ListMagnifyingGlass, Coins, HandCoins, BookOpen
 } from "@phosphor-icons/react";
 import { ROLE_LABEL } from "@/lib/api";
 
@@ -23,6 +23,7 @@ const ALL = [
   { to: "/kategori", label: "Kategori", icon: TagChevron, tid: "nav-kategori", roles: ["admin"] },
   { to: "/pengguna", label: "Pengguna", icon: Users, tid: "nav-pengguna", roles: ["admin"] },
   { to: "/audit-trail", label: "Audit Trail", icon: ListMagnifyingGlass, tid: "nav-audit", roles: ["admin", "auditor"] },
+  { to: "/panduan", label: "Panduan", icon: BookOpen, tid: "nav-panduan", roles: "*" },
   { to: "/pengaturan", label: "Pengaturan", icon: Gear, tid: "nav-settings", roles: ["admin"] },
 ];
 
@@ -35,12 +36,12 @@ export default function Layout() {
       <aside className="w-64 border-r border-slate-200 bg-white flex flex-col sticky top-0 h-screen" data-testid="sidebar">
         <div className="px-5 py-5 border-b border-slate-200">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sky-500 to-sky-700 grid place-items-center text-white shadow-sm">
-              <Receipt size={18} weight="fill" />
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-sky-500 to-sky-700 grid place-items-center text-white shadow-sm">
+              <Receipt size={20} weight="fill" />
             </div>
             <div className="min-w-0">
-              <div className="font-bold text-slate-900 leading-tight text-sm truncate" style={{fontFamily:'Manrope'}}>eKlaim</div>
-              <div className="text-[10px] uppercase text-sky-700 tracking-wider truncate" data-testid="sidebar-company">{user?.company?.name || "—"}</div>
+              <div className="font-bold text-slate-900 leading-tight" style={{fontFamily:'Manrope'}}>eKlaim</div>
+              <div className="text-[10px] uppercase text-slate-500 tracking-wider truncate" data-testid="sidebar-company">{user?.company?.name || "—"}</div>
             </div>
           </div>
         </div>

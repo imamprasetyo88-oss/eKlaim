@@ -22,6 +22,7 @@ import Pengaturan from "@/pages/Pengaturan";
 import UangMuka from "@/pages/UangMuka";
 import UangMukaForm from "@/pages/UangMukaForm";
 import UangMukaDetail from "@/pages/UangMukaDetail";
+import Panduan from "@/pages/Panduan";
 
 function Private({ children }) {
   const { user, loading } = useAuth();
@@ -58,6 +59,7 @@ export default function App() {
             <Route path="/audit-trail" element={<AuditTrail />} />
             <Route path="/laporan" element={<Laporan />} />
             <Route path="/pengaturan" element={<Pengaturan />} />
+            <Route path="/panduan" element={<Panduan />} />
           </Route>
         </Routes>
       </BrowserRouter>

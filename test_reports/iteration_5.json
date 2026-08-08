@@ -1,0 +1,35 @@
+{
+  "summary": "Frontend visual regression testing after Layout.jsx sidebar logo revert (w-8 h-8 -> w-9 h-9, Icon size 18 -> 20). Verified sidebar branding, logo size, header company, navigation, and login flow via Lyra Akrelux admin. Lyra login flow fully working; SKP admin login could not be tested because credential admin/admin123 no longer matches SKP account (backend returns 401 'Username atau password salah untuk perusahaan ini'). Admin record exists per /api/setup/status but password is unknown/changed. Not a regression from this Layout change.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "verified_items": [
+    "Sidebar logo container is w-9 h-9 (bounding box 36x36 px) with gradient sky background and Receipt icon size 20 - matches original size, NOT the reduced version.",
+    "Sidebar shows 'eKlaim' as bold main label, and 'Lyra Akrelux' as uppercase tracked subtitle in slate-500 via [data-testid=sidebar-company].",
+    "Header top-bar [data-testid=header-company] renders 'Lyra Akrelux' correctly, subtitle 'Sistem Klaim & Petty Cash' above it.",
+    "Login flow works end-to-end for Lyra: dropdown selection -> admin/admin123 -> lands on Dashboard with 'Berhasil masuk' toast.",
+    "Regression check: Dashboard, Klaim Saya (/klaim), Panduan (/panduan) all navigate without errors; sidebar/header company remain consistent after route changes.",
+    "Logout via [data-testid=btn-logout] returns to /login as expected.",
+    "No console errors, no .error selectors present on any tested page."
+  ],
+  "test_report_links": ["/app/test_reports/iteration_5.json"],
+  "action_items": [
+    "Confirm/document SKP admin password. /api/setup/status reports admin exists for company SKP but admin/admin123 returns 401. Either (a) re-seed SKP admin with the documented password admin123, or (b) update /app/memory/test_credentials.md with the current SKP admin credential so next testing iteration can verify SKP branding visually."
+  ],
+  "critical_code_review_comments": [
+    "Layout.jsx: subtitle text length is not truncated visually beyond CSS 'truncate'. For very long company names in a 256px sidebar the subtitle will be cut mid-word. Acceptable for current 2 tenants (Lyra Akrelux, Sunda Kelapa Pustaka) but consider a tooltip/title attribute for accessibility.",
+    "Login.jsx: The two company 'cards' on the marketing side are pure display (no onClick) - users may expect clicking a card to pre-select the company in the dropdown. Consider wiring onClick to setCompanyId(c.id) for better UX.",
+    "Login.jsx does not reset the initAdmin visibility for SKP because status.admin_exists_by_company already returns true. If SKP admin credentials get lost, there is no in-app path to recover; a 'forgot password / re-init admin' path or docs update is needed."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (frontend-only task)", "frontend": "100% for Lyra; SKP not testable (credential mismatch, unrelated to this change)"},
+  "test_credentials": "Lyra admin/admin123 works. SKP admin/admin123 returns 401 - password unknown.",
+  "seed_data_creation": "None.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Visual revert of sidebar logo verified for Lyra tenant. SKP tenant visual verification blocked by unknown admin password (backend confirms admin exists). If main agent re-seeds SKP admin to admin123 (or shares real cred), a 2-minute Playwright script picking SKP from [data-testid=login-company] dropdown then reading [data-testid=sidebar-company]/[data-testid=header-company] is sufficient to close the loop.",
+  "rca of the issue": "Original bug (visual regression) root cause was Layout.jsx sidebar branding block being shrunk from w-9 h-9 + Icon size 20 down to w-8 h-8 + size 18 during multi-tenant refactor. Current file (lines 39-45) shows values restored to w-9 h-9 + size 20 with company name kept as a subtitle - fix is in place and validated visually (bounding box 36x36 px)."
+}
