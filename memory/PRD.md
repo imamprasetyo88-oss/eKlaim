@@ -1,37 +1,48 @@
-# Inventory Decision Support System (IDSS) — PRD
+# eKlaim Lyra - Petty Cash & Expense Claim System
 
-## Original Problem Statement
-Modern web app called Inventory Decision Support System (IDSS). NOT ERP, NOT WMS. Decision Support System to help Purchasing, Warehouse, PPIC and Directors monitor inventory health and create purchase planning recommendations. Medium-large distribution companies. Clean UI similar to Power BI / Notion / Linear. Light theme. Blue (#2563eb) + Orange (#f97316).
+## Company: Lyra Akrelux
+Sistem klaim biaya operasional harian kantor dengan alur verifikasi berjenjang dan pengelolaan petty cash.
 
-## User Choices
-- LLM: GPT 5.6 Terra (Emergent LLM key)
-- No auth
-- Start empty, upload Excel
-- Server-side Excel parsing (openpyxl)
-- Deep focus: Dashboard + Purchase Planning (all 9 menus present)
+## Roles
+- **admin**: create users, categories, set petty cash initial balance
+- **user**: create/edit/submit claims, upload receipts
+- **verifikator**: verify claims, execute payment from petty cash, request top-up
+- **atasan**: approve/reject claims that passed verification
+- **finance**: approve top-up requests and refill petty cash
+- **auditor**: read-only, view all data + audit trail
 
-## Architecture
-- Backend: FastAPI (single `server.py`), MongoDB, openpyxl for Excel, emergentintegrations for LLM
-- Frontend: React 19 + shadcn/ui + Recharts + lucide-react + sonner toasts
-- All /api routes; env-driven URLs
+## Claim Flow
+DRAFT → DIAJUKAN → (Verifikator) → PERLU_KOREKSI / MENUNGGU_APPROVAL / DITOLAK
+                                    ↓
+                                    (Atasan) → DITOLAK / MENUNGGU_PEMBAYARAN
+                                                        ↓
+                                                        (Verifikator bayar dari petty cash) → DIBAYAR
 
-## What's Implemented (2026-02)
-- 9 menu pages, sidebar, global search, AI Insight Panel
-- Dashboard: 10 KPI cards, 4 alert panels (red/orange/yellow/green), 4 charts (sales trend, PO timeline, by category, by supplier), AI panel
-- Data Upload: 4 file types with duplicate detection + upload history
-- Master Data: Items, Factories, Campaigns CRUD (tabs)
-- Inventory Monitoring: full table with ABC, coverage, projected, aging, status labels + filters
-- Purchase Planning: recommendations with MOQ rounding (pallet + factory MOQ), factory MOQ satisfaction cards, urgency, deadlines
-- Purchase Calendar: grouped events (ETAs + Scheduled deadlines), late PO panel
-- Business Rules: 10 default rules with toggle
-- Reports: 8 pre-built reports with CSV export
-- Settings + demo seed + danger zone
-- AI Insight via GPT 5.6 Terra + rule-based fallback
+## Top-up Flow (manual, on-demand)
+Verifikator klik "Request Top-up" → MENUNGGU_FINANCE → (Finance approve + upload bukti transfer) → SELESAI
+                                                       Petty cash bertambah
+
+## Petty Cash
+- Default saldo awal: Rp 5.000.000 (admin bisa ubah di Pengaturan)
+- Real-time balance, transaction log (IN/OUT)
+- Rekonsiliasi otomatis: saldo_awal + IN - OUT = saldo_sekarang
+
+## Key Features Delivered
+- JWT-based auth (username+password), admin creates all users
+- 6 default categories (Karcis Tol, BBM, ATK, Kebersihan, Konsumsi)
+- Multi-file upload for receipts & transfer proofs via object storage
+- OCR foto struk via GPT-5.6 Terra Vision (auto-fill jumlah/tanggal/merchant/kategori)
+- Dashboard analytics: 30-day trend, top categories 60-day, action queue per role
+- Rekonsiliasi otomatis dengan balance check
+- Audit trail lengkap semua aksi
+- Laporan dengan filter + CSV export (UTF-8 BOM untuk Excel)
+- Bahasa Indonesia sepenuhnya
+- Corporate blue (sky-600) + putih, Manrope + IBM Plex Sans fonts, Phosphor icons
 
 ## Backlog
-- P1: PDF/Excel exports (only CSV so far)
-- P1: Edit-in-place for items, factories, campaigns (currently add + delete)
-- P1: Sales forecasting (moving average / seasonality)
-- P2: Multi-warehouse projection detail
-- P2: Notifications 5 days before scheduled purchase
-- P2: Advanced filters sidebar (warehouse, brand)
+- P1: PDF voucher per klaim
+- P1: WhatsApp/Email notifications
+- P1: Batas bulanan per user/kategori
+- P2: Approval multi-level berdasarkan nilai
+- P2: Cash Advance workflow
+- P2: Sub-kategori

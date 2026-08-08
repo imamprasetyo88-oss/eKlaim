@@ -1,1174 +1,858 @@
-"""IDSS - Inventory Decision Support System backend."""
-from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Query
-from dotenv import load_dotenv
+"""eKlaim Lyra - Petty Cash & Expense Claim Backend"""
+from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Depends, Header, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import os
-import io
-import uuid
-import logging
-import math
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from fastapi.responses import StreamingResponse
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from passlib.context import CryptContext
+from jose import jwt, JWTError
+import os, io, uuid, logging, base64, requests
+from dotenv import load_dotenv
+from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+MONGO_URL = os.environ['MONGO_URL']
+DB_NAME = os.environ['DB_NAME']
+JWT_SECRET = os.environ.get('JWT_SECRET', 'eklaim-lyra-secret-change-me')
+JWT_ALG = 'HS256'
+JWT_EXPIRE_HOURS = 24 * 7
+EMERGENT_KEY = os.environ.get('EMERGENT_LLM_KEY')
+APP_NAME = 'eklaim-lyra'
 
-app = FastAPI(title="IDSS API")
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
+
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+app = FastAPI(title="eKlaim Lyra API")
 api = APIRouter(prefix="/api")
 
-logger = logging.getLogger("idss")
+logger = logging.getLogger("eklaim")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-# -------------------- MODELS --------------------
-class Item(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    item_code: str
-    description: str = ""
-    brand: str = ""
-    category: str = ""
-    supplier: str = ""
-    factory: str = ""
-    warehouse: str = ""
-    unit: str = "PCS"
-    weight_per_box: float = 0
-    boxes_per_pallet: int = 1
-    purchase_by_pallet: bool = False
-    lead_time: int = 30
-    safety_stock_days: int = 7
-    default_buffer_days: int = 14
-    moq_per_pallet: int = 0
-    inventory_value: float = 0
-    status: str = "Active"
-
-class Factory(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    factory_name: str
-    supplier: str = ""
-    minimum_order_ton: float = 0
-    maximum_order_ton: float = 0
-    standard_lead_time: int = 30
-    purchase_type: str = "Dynamic"  # Scheduled / Dynamic
-    purchase_schedule_day: int = 25
-
-class Campaign(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    start_date: str
-    end_date: str
-    item_code: str = ""
-    expected_sales_increase_pct: float = 0
-
-class AIRequest(BaseModel):
-    context: str = "dashboard"
-    payload: Dict[str, Any] = {}
-
-def _iso(dt: datetime) -> str:
-    return dt.isoformat()
-
-def _now():
-    return datetime.now(timezone.utc)
-
-# -------------------- EXCEL PARSING --------------------
-COLUMN_MAPS = {
-    "master-item": {
-        "item_code": ["item code", "itemcode", "sku", "code"],
-        "description": ["description", "desc", "name"],
-        "brand": ["brand"],
-        "category": ["category"],
-        "supplier": ["supplier"],
-        "factory": ["factory"],
-        "warehouse": ["warehouse"],
-        "unit": ["unit", "uom"],
-        "weight_per_box": ["weight per box", "weight/box", "weight"],
-        "boxes_per_pallet": ["boxes per pallet", "box/pallet"],
-        "purchase_by_pallet": ["purchase by pallet", "by pallet"],
-        "lead_time": ["lead time", "leadtime"],
-        "safety_stock_days": ["safety stock days", "safety stock"],
-        "default_buffer_days": ["default buffer days", "buffer days"],
-        "moq_per_pallet": ["moq per pallet", "moq pallet", "moq"],
-        "inventory_value": ["inventory value", "value"],
-        "status": ["status"],
-    },
-    "sales-history": {
-        "date": ["date", "sales date"],
-        "item_code": ["item code", "itemcode", "sku"],
-        "customer": ["customer"],
-        "sales_qty": ["sales qty", "qty", "quantity"],
-        "sales_value": ["sales value", "value", "amount"],
-        "warehouse": ["warehouse"],
-        "channel": ["channel"],
-    },
-    "stock-balance": {
-        "warehouse": ["warehouse"],
-        "item_code": ["item code", "itemcode", "sku"],
-        "available_qty": ["available qty", "available"],
-        "reserved_qty": ["reserved qty", "reserved"],
-        "blocked_qty": ["blocked qty", "blocked"],
-        "total_qty": ["total qty", "total"],
-        "inventory_value": ["inventory value", "value"],
-    },
-    "po-outstanding": {
-        "po_number": ["po number", "po no", "po"],
-        "supplier": ["supplier"],
-        "factory": ["factory"],
-        "item_code": ["item code", "itemcode", "sku"],
-        "qty": ["qty", "quantity"],
-        "eta": ["eta", "arrival date"],
-        "status": ["status"],
-        "weight": ["weight"],
-        "tonnage": ["tonnage", "ton"],
-    },
-}
-
-COLLECTION_MAP = {
-    "master-item": "items",
-    "sales-history": "sales",
-    "stock-balance": "stock",
-    "po-outstanding": "po",
-}
-
-def _map_header(header_row, kind):
-    m = COLUMN_MAPS[kind]
-    result = {}
-    lowered = [str(h).strip().lower() if h else "" for h in header_row]
-    for field, aliases in m.items():
-        for idx, h in enumerate(lowered):
-            if h in aliases or any(a in h for a in aliases):
-                result[field] = idx
-                break
-    return result
-
-def _cell(row, idx, default=""):
-    if idx is None or idx >= len(row):
-        return default
-    v = row[idx]
-    return default if v is None else v
-
-def _num(v, default=0):
+# -------------------- OBJECT STORAGE --------------------
+_storage_key: Optional[str] = None
+def init_storage(force: bool = False):
+    global _storage_key
+    if _storage_key and not force:
+        return _storage_key
     try:
-        if v is None or v == "":
-            return default
-        return float(v)
-    except (ValueError, TypeError):
-        return default
+        r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
+        r.raise_for_status()
+        _storage_key = r.json()["storage_key"]
+        return _storage_key
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
+        return None
 
-def _int(v, default=0):
-    return int(_num(v, default))
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    if not key:
+        raise HTTPException(500, "Storage not available")
+    r = requests.put(f"{STORAGE_URL}/objects/{path}",
+                     headers={"X-Storage-Key": key, "Content-Type": content_type},
+                     data=data, timeout=120)
+    if r.status_code == 404:
+        key = init_storage(force=True)
+        r = requests.put(f"{STORAGE_URL}/objects/{path}",
+                         headers={"X-Storage-Key": key, "Content-Type": content_type},
+                         data=data, timeout=120)
+    r.raise_for_status()
+    return r.json()
 
-def _bool(v):
-    s = str(v).strip().lower()
-    return s in ("true", "1", "yes", "y", "t")
+def get_object(path: str):
+    key = init_storage()
+    r = requests.get(f"{STORAGE_URL}/objects/{path}",
+                     headers={"X-Storage-Key": key}, timeout=60)
+    if r.status_code == 404:
+        key = init_storage(force=True)
+        r = requests.get(f"{STORAGE_URL}/objects/{path}",
+                         headers={"X-Storage-Key": key}, timeout=60)
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "application/octet-stream")
 
-def _date_str(v):
-    if isinstance(v, datetime):
-        return v.date().isoformat()
-    if v is None:
-        return ""
-    return str(v)
-
-def parse_excel(content: bytes, kind: str):
-    wb = load_workbook(io.BytesIO(content), data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return [], ["Empty file"]
-    header = rows[0]
-    idx = _map_header(header, kind)
-    if not idx:
-        return [], ["No matching columns found in header"]
-    records, errors = [], []
-    for i, row in enumerate(rows[1:], start=2):
-        if all(c is None or c == "" for c in row):
-            continue
-        try:
-            if kind == "master-item":
-                rec = {
-                    "id": str(uuid.uuid4()),
-                    "item_code": str(_cell(row, idx.get("item_code"))).strip(),
-                    "description": str(_cell(row, idx.get("description"))),
-                    "brand": str(_cell(row, idx.get("brand"))),
-                    "category": str(_cell(row, idx.get("category"))),
-                    "supplier": str(_cell(row, idx.get("supplier"))),
-                    "factory": str(_cell(row, idx.get("factory"))),
-                    "warehouse": str(_cell(row, idx.get("warehouse"))),
-                    "unit": str(_cell(row, idx.get("unit"), "PCS")),
-                    "weight_per_box": _num(_cell(row, idx.get("weight_per_box"))),
-                    "boxes_per_pallet": _int(_cell(row, idx.get("boxes_per_pallet"), 1)),
-                    "purchase_by_pallet": _bool(_cell(row, idx.get("purchase_by_pallet"))),
-                    "lead_time": _int(_cell(row, idx.get("lead_time"), 30)),
-                    "safety_stock_days": _int(_cell(row, idx.get("safety_stock_days"), 7)),
-                    "default_buffer_days": _int(_cell(row, idx.get("default_buffer_days"), 14)),
-                    "moq_per_pallet": _int(_cell(row, idx.get("moq_per_pallet"))),
-                    "inventory_value": _num(_cell(row, idx.get("inventory_value"))),
-                    "status": str(_cell(row, idx.get("status"), "Active")),
-                }
-                if not rec["item_code"]:
-                    errors.append(f"Row {i}: missing item_code")
-                    continue
-            elif kind == "sales-history":
-                rec = {
-                    "id": str(uuid.uuid4()),
-                    "date": _date_str(_cell(row, idx.get("date"))),
-                    "item_code": str(_cell(row, idx.get("item_code"))).strip(),
-                    "customer": str(_cell(row, idx.get("customer"))),
-                    "sales_qty": _num(_cell(row, idx.get("sales_qty"))),
-                    "sales_value": _num(_cell(row, idx.get("sales_value"))),
-                    "warehouse": str(_cell(row, idx.get("warehouse"))),
-                    "channel": str(_cell(row, idx.get("channel"))),
-                }
-            elif kind == "stock-balance":
-                rec = {
-                    "id": str(uuid.uuid4()),
-                    "warehouse": str(_cell(row, idx.get("warehouse"))),
-                    "item_code": str(_cell(row, idx.get("item_code"))).strip(),
-                    "available_qty": _num(_cell(row, idx.get("available_qty"))),
-                    "reserved_qty": _num(_cell(row, idx.get("reserved_qty"))),
-                    "blocked_qty": _num(_cell(row, idx.get("blocked_qty"))),
-                    "total_qty": _num(_cell(row, idx.get("total_qty"))),
-                    "inventory_value": _num(_cell(row, idx.get("inventory_value"))),
-                }
-            else:  # po-outstanding
-                rec = {
-                    "id": str(uuid.uuid4()),
-                    "po_number": str(_cell(row, idx.get("po_number"))).strip(),
-                    "supplier": str(_cell(row, idx.get("supplier"))),
-                    "factory": str(_cell(row, idx.get("factory"))),
-                    "item_code": str(_cell(row, idx.get("item_code"))).strip(),
-                    "qty": _num(_cell(row, idx.get("qty"))),
-                    "eta": _date_str(_cell(row, idx.get("eta"))),
-                    "status": str(_cell(row, idx.get("status"), "Open")),
-                    "weight": _num(_cell(row, idx.get("weight"))),
-                    "tonnage": _num(_cell(row, idx.get("tonnage"))),
-                }
-            records.append(rec)
-        except (ValueError, TypeError, KeyError) as e:
-            errors.append(f"Row {i}: {e}")
-    return records, errors
-
-# -------------------- EXCEL TEMPLATES --------------------
-TEMPLATE_DEFS = {
-    "master-item": {
-        "sheet": "Master Item",
-        "columns": [
-            ("Item Code", "HVS-A4-70", "Unique SKU code (required)"),
-            ("Description", "HVS Paper A4 70gsm", "Product name / description"),
-            ("Brand", "PaperCo", "Brand name"),
-            ("Category", "Office Paper", "Category / product family"),
-            ("Supplier", "Asia Pulp & Paper", "Supplier name (should match Factory Master)"),
-            ("Factory", "APP", "Factory name (must match Master Factory)"),
-            ("Warehouse", "JKT-01", "Default warehouse code"),
-            ("Unit", "BOX", "Unit of measure (BOX/PCS/RIM)"),
-            ("Weight Per Box", 12.5, "Weight per box in kg"),
-            ("Boxes Per Pallet", 40, "How many boxes fit in 1 pallet"),
-            ("Purchase By Pallet", "TRUE", "TRUE if must order in full pallets"),
-            ("Lead Time", 45, "Standard lead time in days"),
-            ("Safety Stock Days", 7, "Safety stock target in days"),
-            ("Default Buffer Days", 21, "Buffer stock target in days"),
-            ("MOQ Per Pallet", 40, "SKU-level MOQ in boxes"),
-            ("Inventory Value", 850000, "Current inventory value"),
-            ("Status", "Active", "Active / Inactive"),
-        ],
-    },
-    "sales-history": {
-        "sheet": "Sales History",
-        "columns": [
-            ("Date", "2026-01-15", "Sales date (YYYY-MM-DD)"),
-            ("Item Code", "HVS-A4-70", "Must match Master Item code"),
-            ("Customer", "PT Contoh Jaya", "Customer name or code"),
-            ("Sales Qty", 20, "Quantity sold (in Unit)"),
-            ("Sales Value", 4000000, "Sales value in currency"),
-            ("Warehouse", "JKT-01", "Warehouse code"),
-            ("Channel", "Wholesale", "Retail / Wholesale / Online"),
-        ],
-    },
-    "stock-balance": {
-        "sheet": "Stock Balance",
-        "columns": [
-            ("Warehouse", "JKT-01", "Warehouse code"),
-            ("Item Code", "HVS-A4-70", "Must match Master Item code"),
-            ("Available Qty", 500, "Available (ready-to-sell)"),
-            ("Reserved Qty", 50, "Reserved for orders"),
-            ("Blocked Qty", 0, "Blocked / QC hold"),
-            ("Total Qty", 550, "Sum of Available + Reserved + Blocked"),
-            ("Inventory Value", 850000, "Total inventory value at this warehouse"),
-        ],
-    },
-    "po-outstanding": {
-        "sheet": "PO Outstanding",
-        "columns": [
-            ("PO Number", "PO-2401", "Purchase order number"),
-            ("Supplier", "Asia Pulp & Paper", "Supplier name"),
-            ("Factory", "APP", "Factory name"),
-            ("Item Code", "HVS-A4-70", "Must match Master Item code"),
-            ("Qty", 400, "PO quantity"),
-            ("ETA", "2026-02-15", "Estimated Time of Arrival (YYYY-MM-DD)"),
-            ("Status", "Open", "Open / In Transit / Received / Closed"),
-            ("Weight", 5000, "Total weight (kg)"),
-            ("Tonnage", 5, "Total tonnage (ton)"),
-        ],
-    },
+MIME_TYPES = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "gif": "image/gif", "webp": "image/webp", "pdf": "application/pdf",
 }
 
-def _build_template_xlsx(kind: str) -> bytes:
-    tpl = TEMPLATE_DEFS[kind]
-    wb = Workbook()
-    ws = wb.active
-    ws.title = tpl["sheet"]
+# -------------------- HELPERS --------------------
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
-    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    note_fill = PatternFill(start_color="EFF6FF", end_color="EFF6FF", fill_type="solid")
-    note_font = Font(color="475569", italic=True, size=10)
+def hash_pw(p: str) -> str:
+    return pwd_ctx.hash(p)
 
-    # Row 1: headers
-    for i, (name, _sample, _note) in enumerate(tpl["columns"], start=1):
-        c = ws.cell(row=1, column=i, value=name)
-        c.fill = header_fill
-        c.font = header_font
-        c.alignment = Alignment(horizontal="left", vertical="center")
+def verify_pw(p: str, h: str) -> bool:
+    try:
+        return pwd_ctx.verify(p, h)
+    except Exception:
+        return False
 
-    # Row 2: notes (grey italic)
-    for i, (_name, _sample, note) in enumerate(tpl["columns"], start=1):
-        c = ws.cell(row=2, column=i, value=f"↑ {note}")
-        c.fill = note_fill
-        c.font = note_font
-        c.alignment = Alignment(wrap_text=True, vertical="top")
+def make_token(user: dict) -> str:
+    payload = {
+        "sub": user["id"],
+        "username": user["username"],
+        "role": user["role"],
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-    # Row 3: sample values
-    for i, (_name, sample, _note) in enumerate(tpl["columns"], start=1):
-        ws.cell(row=3, column=i, value=sample)
+async def current_user(authorization: Optional[str] = Header(None), auth: Optional[str] = Query(None)):
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    elif auth:
+        token = auth
+    if not token:
+        raise HTTPException(401, "Not authenticated")
+    try:
+        data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    except JWTError:
+        raise HTTPException(401, "Invalid token")
+    user = await db.users.find_one({"id": data["sub"]}, {"_id": 0, "password_hash": 0})
+    if not user or not user.get("active", True):
+        raise HTTPException(401, "User not found or inactive")
+    return user
 
-    # Auto width
-    for i, (name, sample, _note) in enumerate(tpl["columns"], start=1):
-        width = max(len(str(name)), len(str(sample))) + 4
-        ws.column_dimensions[chr(64 + i) if i <= 26 else "A"].width = min(width, 32)
-    ws.row_dimensions[2].height = 42
-    ws.freeze_panes = "A4"
+def require_roles(*roles):
+    async def _dep(user=Depends(current_user)):
+        if user["role"] not in roles:
+            raise HTTPException(403, f"Role required: {roles}")
+        return user
+    return _dep
 
-    # Instructions sheet
-    info = wb.create_sheet("README")
-    info["A1"] = f"IDSS Template — {tpl['sheet']}"
-    info["A1"].font = Font(bold=True, size=14, color="1D4ED8")
-    info["A3"] = "Instructions:"
-    info["A3"].font = Font(bold=True)
-    tips = [
-        "1. Row 1 contains column headers — DO NOT rename or delete.",
-        "2. Row 2 contains guidance notes — you may delete this row before uploading.",
-        "3. Row 3 is a sample record — replace it with your real data.",
-        "4. Save as .xlsx and upload via the Data Upload page in IDSS.",
-        "5. Item Code must match across Master Item, Stock, Sales, and PO files.",
-        "6. Dates use YYYY-MM-DD format (Excel date cells also accepted).",
-        "7. Duplicate uploads (same file content) are automatically rejected.",
-    ]
-    for i, t in enumerate(tips, start=4):
-        info[f"A{i}"] = t
-    info.column_dimensions["A"].width = 80
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
-
-@api.get("/templates/{kind}")
-async def download_template(kind: str):
-    if kind not in TEMPLATE_DEFS:
-        raise HTTPException(404, f"Unknown template. Available: {list(TEMPLATE_DEFS.keys())}")
-    data = _build_template_xlsx(kind)
-    filename = f"IDSS_Template_{kind.replace('-', '_')}.xlsx"
-    return StreamingResponse(
-        io.BytesIO(data),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-# -------------------- UPLOAD ENDPOINTS --------------------
-VALID_TYPES = list(COLUMN_MAPS.keys())
-
-@api.post("/upload/{kind}")
-async def upload_file(kind: str, file: UploadFile = File(...)):
-    if kind not in VALID_TYPES:
-        raise HTTPException(400, f"Invalid type. Use: {VALID_TYPES}")
-    content = await file.read()
-    # Check duplicate
-    import hashlib
-    checksum = hashlib.md5(content).hexdigest()
-    existing = await db.upload_history.find_one({"checksum": checksum})
-    if existing:
-        raise HTTPException(409, "Duplicate file already uploaded")
-    records, errors = parse_excel(content, kind)
-    collection = COLLECTION_MAP[kind]
-    if records:
-        # For master-item, upsert by item_code; others append (replace all for stock)
-        if kind == "master-item":
-            for r in records:
-                await db.items.update_one(
-                    {"item_code": r["item_code"]},
-                    {"$set": r},
-                    upsert=True,
-                )
-        elif kind == "stock-balance":
-            # Replace stock: latest snapshot only
-            await db.stock.delete_many({})
-            await db.stock.insert_many(records)
-        else:
-            await db[collection].insert_many(records)
-    history = {
+async def audit(user, action: str, entity_type: str, entity_id: str, meta: dict = None):
+    await db.audit.insert_one({
         "id": str(uuid.uuid4()),
-        "kind": kind,
-        "filename": file.filename,
-        "checksum": checksum,
-        "uploaded_at": _iso(_now()),
-        "total_rows": len(records),
-        "errors": errors[:20],
-        "error_count": len(errors),
-        "status": "success" if not errors else "partial",
-    }
-    await db.upload_history.insert_one(history)
-    history.pop("_id", None)
-    return history
+        "actor_id": user["id"],
+        "actor_name": user.get("name") or user.get("username"),
+        "actor_role": user["role"],
+        "action": action,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "meta": meta or {},
+        "timestamp": now_iso(),
+    })
 
-@api.get("/upload/history")
-async def upload_history():
-    docs = await db.upload_history.find({}, {"_id": 0}).sort("uploaded_at", -1).to_list(200)
+# -------------------- MODELS --------------------
+class LoginReq(BaseModel):
+    username: str
+    password: str
+
+class UserCreate(BaseModel):
+    username: str
+    name: str
+    password: str
+    role: Literal["admin", "user", "verifikator", "atasan", "finance", "auditor"]
+    email: Optional[str] = ""
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    active: Optional[bool] = None
+    email: Optional[str] = None
+
+class PasswordChange(BaseModel):
+    old_password: Optional[str] = None
+    new_password: str
+
+class CategoryModel(BaseModel):
+    code: str
+    name: str
+    icon: str = "Receipt"
+    active: bool = True
+
+class ClaimCreate(BaseModel):
+    category_id: str
+    tanggal: str  # YYYY-MM-DD
+    deskripsi: str
+    tujuan: Optional[str] = ""
+    jumlah: float
+    receipt_ids: List[str] = []
+
+class ClaimAction(BaseModel):
+    catatan: Optional[str] = ""
+    transfer_proof_ids: List[str] = []
+
+class TopUpCreate(BaseModel):
+    jumlah: float
+    catatan: Optional[str] = ""
+
+class TopUpApprove(BaseModel):
+    catatan: Optional[str] = ""
+    transfer_proof_ids: List[str] = []
+
+class PettyCashInit(BaseModel):
+    saldo_awal: float
+
+# -------------------- AUTH --------------------
+@api.post("/auth/login")
+async def login(body: LoginReq):
+    u = await db.users.find_one({"username": body.username.lower()})
+    if not u or not verify_pw(body.password, u.get("password_hash", "")):
+        raise HTTPException(401, "Username atau password salah")
+    if not u.get("active", True):
+        raise HTTPException(403, "Akun tidak aktif")
+    user_public = {k: v for k, v in u.items() if k not in ("_id", "password_hash")}
+    token = make_token(user_public)
+    return {"token": token, "user": user_public}
+
+@api.get("/auth/me")
+async def me(user=Depends(current_user)):
+    return user
+
+@api.post("/auth/change-password")
+async def change_password(body: PasswordChange, user=Depends(current_user)):
+    doc = await db.users.find_one({"id": user["id"]})
+    if body.old_password and not verify_pw(body.old_password, doc["password_hash"]):
+        raise HTTPException(400, "Password lama salah")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": hash_pw(body.new_password)}})
+    await audit(user, "change_password", "user", user["id"])
+    return {"ok": True}
+
+# -------------------- USERS (ADMIN) --------------------
+@api.get("/users")
+async def list_users(user=Depends(require_roles("admin", "auditor"))):
+    docs = await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(500)
     return docs
 
-# -------------------- MASTER DATA --------------------
-@api.get("/items")
-async def list_items(
-    search: str = "",
-    category: str = "",
-    supplier: str = "",
-    factory: str = "",
-    brand: str = "",
-    warehouse: str = "",
-    limit: int = 500,
-):
-    q = {}
-    if search:
-        q["$or"] = [
-            {"item_code": {"$regex": search, "$options": "i"}},
-            {"description": {"$regex": search, "$options": "i"}},
-        ]
-    for k, v in (("category", category), ("supplier", supplier), ("factory", factory), ("brand", brand), ("warehouse", warehouse)):
-        if v:
-            q[k] = v
-    docs = await db.items.find(q, {"_id": 0}).limit(limit).to_list(limit)
-    return docs
-
-@api.post("/items")
-async def create_item(item: Item):
-    d = item.model_dump()
-    await db.items.update_one({"item_code": d["item_code"]}, {"$set": d}, upsert=True)
-    return d
-
-@api.delete("/items/{item_code}")
-async def delete_item(item_code: str):
-    await db.items.delete_one({"item_code": item_code})
-    return {"ok": True}
-
-@api.get("/factories")
-async def list_factories():
-    return await db.factories.find({}, {"_id": 0}).to_list(500)
-
-@api.post("/factories")
-async def create_factory(f: Factory):
-    d = f.model_dump()
-    await db.factories.update_one({"factory_name": d["factory_name"]}, {"$set": d}, upsert=True)
-    return d
-
-@api.delete("/factories/{name}")
-async def delete_factory(name: str):
-    await db.factories.delete_one({"factory_name": name})
-    return {"ok": True}
-
-@api.get("/campaigns")
-async def list_campaigns():
-    return await db.campaigns.find({}, {"_id": 0}).to_list(500)
-
-@api.post("/campaigns")
-async def create_campaign(c: Campaign):
-    d = c.model_dump()
-    await db.campaigns.insert_one(d)
-    d.pop("_id", None)
-    return d
-
-@api.delete("/campaigns/{cid}")
-async def delete_campaign(cid: str):
-    await db.campaigns.delete_one({"id": cid})
-    return {"ok": True}
-
-@api.get("/po")
-async def list_po():
-    return await db.po.find({}, {"_id": 0}).sort("eta", 1).to_list(1000)
-
-@api.get("/stock")
-async def list_stock():
-    return await db.stock.find({}, {"_id": 0}).to_list(2000)
-
-@api.get("/sales")
-async def list_sales(limit: int = 500):
-    return await db.sales.find({}, {"_id": 0}).sort("date", -1).limit(limit).to_list(limit)
-
-# -------------------- INVENTORY ANALYTICS --------------------
-async def _load_all():
-    items = await db.items.find({}, {"_id": 0}).to_list(5000)
-    stock = await db.stock.find({}, {"_id": 0}).to_list(5000)
-    po = await db.po.find({}, {"_id": 0}).to_list(5000)
-    sales = await db.sales.find({}, {"_id": 0}).to_list(20000)
-    campaigns = await db.campaigns.find({}, {"_id": 0}).to_list(500)
-    factories = await db.factories.find({}, {"_id": 0}).to_list(500)
-    return items, stock, po, sales, campaigns, factories
-
-def _avg_daily_sales(sales, item_code, days=30):
-    now = datetime.now(timezone.utc).date()
-    cutoff = now - timedelta(days=days)
-    total = 0
-    for s in sales:
-        if s.get("item_code") != item_code:
-            continue
-        try:
-            d = datetime.fromisoformat(s["date"]).date() if s.get("date") else None
-        except (ValueError, TypeError):
-            d = None
-        if d and d >= cutoff:
-            total += _num(s.get("sales_qty"))
-    return total / days if days > 0 else 0
-
-def _last_sale_date(sales, item_code):
-    latest = None
-    for s in sales:
-        if s.get("item_code") != item_code:
-            continue
-        try:
-            d = datetime.fromisoformat(s["date"]).date() if s.get("date") else None
-        except (ValueError, TypeError):
-            d = None
-        if d and (latest is None or d > latest):
-            latest = d
-    return latest
-
-def _stock_for(stock, item_code):
-    total = 0
-    value = 0
-    for s in stock:
-        if s.get("item_code") == item_code:
-            total += _num(s.get("available_qty"))
-            value += _num(s.get("inventory_value"))
-    return total, value
-
-def _incoming_po(po, item_code, before_date=None):
-    total = 0
-    for p in po:
-        if p.get("item_code") != item_code:
-            continue
-        if before_date:
-            try:
-                eta = datetime.fromisoformat(p["eta"]).date() if p.get("eta") else None
-            except (ValueError, TypeError):
-                eta = None
-            if not eta or eta > before_date:
-                continue
-        total += _num(p.get("qty"))
-    return total
-
-def _campaign_multiplier(campaigns, item_code):
-    mult = 1.0
-    today = datetime.now(timezone.utc).date()
-    for c in campaigns:
-        try:
-            sd = datetime.fromisoformat(c["start_date"]).date()
-            ed = datetime.fromisoformat(c["end_date"]).date()
-        except (ValueError, TypeError):
-            continue
-        if sd <= today <= ed and (not c.get("item_code") or c["item_code"] == item_code):
-            mult *= 1 + _num(c.get("expected_sales_increase_pct")) / 100
-    return mult
-
-def _classify(item, current_stock, avg_daily, last_sale, coverage):
-    lead = _num(item.get("lead_time"))
-    safety_days = _num(item.get("safety_stock_days"))
-    buffer_days = _num(item.get("default_buffer_days"))
-    today = datetime.now(timezone.utc).date()
-    days_since_sale = (today - last_sale).days if last_sale else 999
-    if current_stock <= 0:
-        return "stock_out", "red"
-    if days_since_sale > 90 and current_stock > 0:
-        return "dead_stock", "red"
-    if avg_daily == 0:
-        return "no_movement", "yellow"
-    if coverage < safety_days:
-        return "critical", "red"
-    if coverage < lead:
-        return "at_risk", "orange"
-    if coverage > (buffer_days + lead) * 3:
-        return "overstock", "yellow"
-    if coverage > 60:
-        return "slow_moving", "yellow"
-    return "healthy", "green"
-
-def _abc_classify(items_with_value):
-    total = sum(v for _, v in items_with_value)
-    if total == 0:
-        return {code: "C" for code, _ in items_with_value}
-    ranked = sorted(items_with_value, key=lambda x: -x[1])
-    result = {}
-    cum = 0
-    for code, val in ranked:
-        cum += val
-        pct = cum / total
-        if pct <= 0.80:
-            result[code] = "A"
-        elif pct <= 0.95:
-            result[code] = "B"
-        else:
-            result[code] = "C"
-    return result
-
-async def _compute_inventory():
-    items, stock, po, sales, campaigns, _factories = await _load_all()
-    # Compute avg sales value per item for ABC
-    now = datetime.now(timezone.utc).date()
-    cutoff90 = now - timedelta(days=90)
-    sales_value_90 = {}
-    for s in sales:
-        try:
-            d = datetime.fromisoformat(s["date"]).date() if s.get("date") else None
-        except (ValueError, TypeError):
-            d = None
-        if d and d >= cutoff90:
-            sales_value_90[s["item_code"]] = sales_value_90.get(s["item_code"], 0) + _num(s.get("sales_value"))
-    abc = _abc_classify([(i["item_code"], sales_value_90.get(i["item_code"], 0)) for i in items])
-    results = []
-    for it in items:
-        code = it["item_code"]
-        stk, val = _stock_for(stock, code)
-        avg = _avg_daily_sales(sales, code)
-        last_sale = _last_sale_date(sales, code)
-        mult = _campaign_multiplier(campaigns, code)
-        eff_avg = avg * mult
-        coverage = (stk / eff_avg) if eff_avg > 0 else (999 if stk > 0 else 0)
-        lead = _num(it.get("lead_time"))
-        buffer_days = _num(it.get("default_buffer_days"))
-        eta_date = now + timedelta(days=int(lead))
-        incoming = _incoming_po(po, code, before_date=eta_date)
-        projected = stk + incoming - eff_avg * lead
-        target_buffer = eff_avg * buffer_days
-        status, light = _classify(it, stk, eff_avg, last_sale, coverage)
-        turnover = (avg * 365 / stk) if stk > 0 else 0
-        aging_days = (now - last_sale).days if last_sale else None
-        results.append({
-            **it,
-            "current_stock": stk,
-            "stock_value": val,
-            "avg_daily_sales": round(eff_avg, 2),
-            "coverage_days": round(coverage, 1) if coverage < 999 else None,
-            "incoming_po": incoming,
-            "projected_stock": round(projected, 1),
-            "target_buffer": round(target_buffer, 1),
-            "turnover": round(turnover, 2),
-            "aging_days": aging_days,
-            "abc": abc.get(code, "C"),
-            "status_label": status,
-            "light": light,
-            "campaign_multiplier": round(mult, 2),
-        })
-    return results
-
-@api.get("/inventory/monitoring")
-async def inventory_monitoring():
-    return await _compute_inventory()
-
-# -------------------- PURCHASE PLANNING --------------------
-@api.get("/purchase/planning")
-async def purchase_planning():
-    rows = await _compute_inventory()
-    _items, _stock, _po, _sales, _campaigns, factories = await _load_all()
-    fac_by_name = {f["factory_name"]: f for f in factories}
-    recs = []
-    for r in rows:
-        if r["status_label"] in ("dead_stock",):
-            continue
-        avg = r["avg_daily_sales"]
-        lead = _num(r.get("lead_time"))
-        buffer_days = _num(r.get("default_buffer_days"))
-        target = avg * (lead + buffer_days)
-        need = max(0, target - r["current_stock"] - r["incoming_po"])
-        boxes = need
-        if r.get("purchase_by_pallet") and r.get("boxes_per_pallet"):
-            bpp = int(r["boxes_per_pallet"]) or 1
-            pallets = math.ceil(boxes / bpp) if boxes > 0 else 0
-            # also enforce moq per pallet
-            moq_pallet = _num(r.get("moq_per_pallet"))
-            if moq_pallet and pallets * bpp < moq_pallet:
-                pallets = math.ceil(moq_pallet / bpp)
-            boxes = pallets * bpp
-        recommended = round(boxes)
-        wpb = _num(r.get("weight_per_box"))
-        tonnage = recommended * wpb / 1000
-        # Purchase deadline
-        fac = fac_by_name.get(r.get("factory", ""), {})
-        purchase_type = fac.get("purchase_type", "Dynamic")
-        today = datetime.now(timezone.utc).date()
-        if purchase_type == "Scheduled":
-            day = int(fac.get("purchase_schedule_day", 25))
-            year, month = today.year, today.month
-            try:
-                deadline = today.replace(day=day)
-            except ValueError:
-                deadline = today
-            if deadline < today:
-                nm = month + 1
-                ny = year
-                if nm > 12:
-                    nm = 1; ny += 1
-                try:
-                    deadline = deadline.replace(year=ny, month=nm)
-                except ValueError:
-                    pass
-        else:
-            # Deadline = date we need to order to avoid stock out considering lead time & safety
-            days_to_action = r["coverage_days"] - lead - _num(r.get("safety_stock_days")) if r.get("coverage_days") else 0
-            deadline = today + timedelta(days=max(0, int(days_to_action or 0)))
-        urgency = "low"
-        if r["light"] == "red":
-            urgency = "critical"
-        elif r["light"] == "orange":
-            urgency = "high"
-        elif r["light"] == "yellow":
-            urgency = "medium"
-        recs.append({
-            "item_code": r["item_code"],
-            "description": r["description"],
-            "factory": r.get("factory", ""),
-            "supplier": r.get("supplier", ""),
-            "category": r.get("category", ""),
-            "current_stock": r["current_stock"],
-            "incoming_po": r["incoming_po"],
-            "coverage_days": r["coverage_days"],
-            "avg_daily_sales": r["avg_daily_sales"],
-            "recommended_qty": recommended,
-            "tonnage": round(tonnage, 3),
-            "purchase_type": purchase_type,
-            "purchase_deadline": deadline.isoformat(),
-            "urgency": urgency,
-            "light": r["light"],
-            "abc": r["abc"],
-            "status_label": r["status_label"],
-        })
-    # Factory MOQ summary
-    fac_totals = {}
-    for rec in recs:
-        f = rec["factory"] or "UNSPECIFIED"
-        fac_totals[f] = fac_totals.get(f, 0) + rec["tonnage"]
-    moq_summary = []
-    for f, ton in fac_totals.items():
-        min_ton = _num(fac_by_name.get(f, {}).get("minimum_order_ton"))
-        moq_summary.append({
-            "factory": f,
-            "total_tonnage": round(ton, 3),
-            "minimum_ton": min_ton,
-            "gap": round(max(0, min_ton - ton), 3),
-            "satisfied": ton >= min_ton if min_ton > 0 else True,
-        })
-    return {"recommendations": recs, "factory_moq": moq_summary}
-
-# -------------------- PURCHASE CALENDAR --------------------
-@api.get("/purchase/calendar")
-async def purchase_calendar():
-    _items, _stock, po, _sales, _campaigns, factories = await _load_all()
-    today = datetime.now(timezone.utc).date()
-    events = []
-    for p in po:
-        try:
-            eta = datetime.fromisoformat(p["eta"]).date() if p.get("eta") else None
-        except (ValueError, TypeError):
-            eta = None
-        if not eta:
-            continue
-        late = eta < today and p.get("status", "").lower() not in ("received", "closed")
-        events.append({
-            "type": "eta",
-            "date": eta.isoformat(),
-            "po_number": p.get("po_number"),
-            "factory": p.get("factory"),
-            "supplier": p.get("supplier"),
-            "item_code": p.get("item_code"),
-            "qty": p.get("qty"),
-            "tonnage": p.get("tonnage"),
-            "status": p.get("status"),
-            "late": late,
-        })
-    for f in factories:
-        if f.get("purchase_type") == "Scheduled":
-            day = int(f.get("purchase_schedule_day", 25))
-            for offset in (0, 1):
-                m = today.month + offset
-                y = today.year
-                if m > 12:
-                    m -= 12; y += 1
-                try:
-                    d = datetime(y, m, day, tzinfo=timezone.utc).date()
-                except ValueError:
-                    continue
-                events.append({
-                    "type": "deadline",
-                    "date": d.isoformat(),
-                    "factory": f["factory_name"],
-                    "supplier": f.get("supplier"),
-                    "purchase_type": "Scheduled",
-                })
-    events.sort(key=lambda e: e["date"])
-    return events
-
-# -------------------- DASHBOARD --------------------
-@api.get("/dashboard/summary")
-async def dashboard():
-    rows = await _compute_inventory()
-    _items, _stock, po, sales, _campaigns, _factories = await _load_all()
-    total_sku = len(rows)
-    active = sum(1 for r in rows if r.get("status", "").lower() == "active")
-    total_qty = sum(r["current_stock"] for r in rows)
-    total_value = sum(r["stock_value"] for r in rows)
-    incoming = sum(_num(p.get("qty")) for p in po)
-    counts = {"stock_out": 0, "critical": 0, "at_risk": 0, "overstock": 0, "slow_moving": 0, "dead_stock": 0, "healthy": 0}
-    for r in rows:
-        counts[r["status_label"]] = counts.get(r["status_label"], 0) + 1
-    # Alerts
-    alerts = {"red": [], "orange": [], "yellow": [], "green": []}
-    for r in rows:
-        light = r["light"]
-        if len(alerts[light]) < 8:
-            alerts[light].append({
-                "item_code": r["item_code"],
-                "description": r["description"],
-                "coverage_days": r["coverage_days"],
-                "current_stock": r["current_stock"],
-                "status_label": r["status_label"],
-            })
-    # PO delayed
-    today = datetime.now(timezone.utc).date()
-    delayed_po = []
-    for p in po:
-        try:
-            eta = datetime.fromisoformat(p["eta"]).date() if p.get("eta") else None
-        except (ValueError, TypeError):
-            eta = None
-        if eta and eta < today and p.get("status", "").lower() not in ("received", "closed"):
-            delayed_po.append({"po_number": p.get("po_number"), "item_code": p.get("item_code"), "eta": p.get("eta"), "factory": p.get("factory")})
-    # Sales trend last 30 days
-    trend = {}
-    cutoff = today - timedelta(days=30)
-    for s in sales:
-        try:
-            d = datetime.fromisoformat(s["date"]).date() if s.get("date") else None
-        except (ValueError, TypeError):
-            d = None
-        if d and d >= cutoff:
-            trend[d.isoformat()] = trend.get(d.isoformat(), 0) + _num(s.get("sales_value"))
-    sales_trend = [{"date": k, "value": round(v, 2)} for k, v in sorted(trend.items())]
-    # PO Timeline (next 60 days)
-    po_timeline = {}
-    for p in po:
-        try:
-            eta = datetime.fromisoformat(p["eta"]).date() if p.get("eta") else None
-        except (ValueError, TypeError):
-            eta = None
-        if eta and today <= eta <= today + timedelta(days=90):
-            po_timeline[eta.isoformat()] = po_timeline.get(eta.isoformat(), 0) + _num(p.get("qty"))
-    po_timeline_arr = [{"date": k, "qty": v} for k, v in sorted(po_timeline.items())]
-    # by category / supplier
-    cat_totals = {}
-    sup_totals = {}
-    for r in rows:
-        cat = r.get("category") or "Uncategorized"
-        sup = r.get("supplier") or "Unspecified"
-        cat_totals[cat] = cat_totals.get(cat, 0) + r["stock_value"]
-        sup_totals[sup] = sup_totals.get(sup, 0) + r["stock_value"]
-    by_category = [{"name": k, "value": round(v, 2)} for k, v in sorted(cat_totals.items(), key=lambda x: -x[1])[:8]]
-    by_supplier = [{"name": k, "value": round(v, 2)} for k, v in sorted(sup_totals.items(), key=lambda x: -x[1])[:8]]
-    # Inventory trend - based on aging distribution (proxy)
-    inv_trend = []
-    for i in range(6, -1, -1):
-        d = today - timedelta(days=i * 5)
-        inv_trend.append({"date": d.isoformat(), "value": round(total_value * (0.9 + 0.02 * (6 - i)), 2)})
-    return {
-        "kpis": {
-            "total_sku": total_sku,
-            "active_sku": active,
-            "inventory_value": round(total_value, 2),
-            "inventory_qty": round(total_qty, 2),
-            "incoming_po": round(incoming, 2),
-            "stock_out_sku": counts.get("stock_out", 0),
-            "critical_sku": counts.get("critical", 0) + counts.get("at_risk", 0),
-            "overstock_sku": counts.get("overstock", 0),
-            "slow_moving_sku": counts.get("slow_moving", 0),
-            "dead_stock_sku": counts.get("dead_stock", 0),
-        },
-        "alerts": alerts,
-        "delayed_po": delayed_po[:10],
-        "charts": {
-            "sales_trend": sales_trend,
-            "inventory_trend": inv_trend,
-            "po_timeline": po_timeline_arr,
-            "by_category": by_category,
-            "by_supplier": by_supplier,
-        },
+@api.post("/users")
+async def create_user(body: UserCreate, user=Depends(require_roles("admin"))):
+    if await db.users.find_one({"username": body.username.lower()}):
+        raise HTTPException(400, "Username sudah dipakai")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "username": body.username.lower(),
+        "name": body.name,
+        "email": body.email or "",
+        "role": body.role,
+        "active": True,
+        "password_hash": hash_pw(body.password),
+        "created_at": now_iso(),
     }
+    await db.users.insert_one(doc)
+    await audit(user, "create_user", "user", doc["id"], {"role": body.role})
+    return {k: v for k, v in doc.items() if k not in ("_id", "password_hash")}
 
-# -------------------- SEARCH --------------------
-@api.get("/search")
-async def global_search(q: str = Query(..., min_length=1)):
-    r = {"q": q}
-    r["items"] = await db.items.find(
-        {"$or": [{"item_code": {"$regex": q, "$options": "i"}}, {"description": {"$regex": q, "$options": "i"}}]},
-        {"_id": 0}
-    ).limit(10).to_list(10)
-    r["suppliers"] = list({d.get("supplier") for d in await db.items.find({"supplier": {"$regex": q, "$options": "i"}}, {"_id": 0, "supplier": 1}).limit(20).to_list(20) if d.get("supplier")})
-    r["factories"] = await db.factories.find({"factory_name": {"$regex": q, "$options": "i"}}, {"_id": 0}).limit(10).to_list(10)
-    r["po"] = await db.po.find({"po_number": {"$regex": q, "$options": "i"}}, {"_id": 0}).limit(10).to_list(10)
-    return r
-
-# -------------------- BUSINESS RULES --------------------
-DEFAULT_RULES = [
-    {"id": "projected_stock", "name": "Projected Stock", "formula": "Current + Incoming PO (before ETA) - Forecast Sales until ETA", "active": True, "editable": False},
-    {"id": "buffer_stock", "name": "Buffer Stock", "formula": "Avg Daily Sales × Target Buffer Days", "active": True, "editable": True},
-    {"id": "safety_stock", "name": "Safety Stock", "formula": "Avg Daily Sales × Safety Stock Days", "active": True, "editable": True},
-    {"id": "factory_moq", "name": "Factory MOQ (Level 1)", "formula": "Sum of tonnage per factory ≥ Minimum Order Ton", "active": True, "editable": True},
-    {"id": "sku_moq", "name": "SKU MOQ (Level 2)", "formula": "Round up to nearest full pallet (Boxes per Pallet)", "active": True, "editable": True},
-    {"id": "scheduled_purchase", "name": "Scheduled Purchase", "formula": "PO must be created on Factory Purchase Schedule Day. Remind 5 days before.", "active": True, "editable": True},
-    {"id": "dynamic_purchase", "name": "Dynamic Purchase", "formula": "PO can be created anytime. Must satisfy Factory MOQ.", "active": True, "editable": True},
-    {"id": "campaign_forecast", "name": "Campaign Adjustment", "formula": "Forecast × (1 + Campaign Sales Increase %)", "active": True, "editable": True},
-    {"id": "abc_analysis", "name": "ABC Analysis", "formula": "A: top 80% value, B: next 15%, C: last 5%", "active": True, "editable": False},
-    {"id": "dead_stock", "name": "Dead Stock", "formula": "No sales in last 90 days AND current stock > 0", "active": True, "editable": True},
-]
-
-@api.get("/business-rules")
-async def get_rules():
-    stored = await db.business_rules.find({}, {"_id": 0}).to_list(100)
-    if not stored:
-        await db.business_rules.insert_many([{**r} for r in DEFAULT_RULES])
-        return DEFAULT_RULES
-    return stored
-
-@api.put("/business-rules/{rid}")
-async def update_rule(rid: str, body: Dict[str, Any]):
-    await db.business_rules.update_one({"id": rid}, {"$set": body})
-    doc = await db.business_rules.find_one({"id": rid}, {"_id": 0})
+@api.put("/users/{uid}")
+async def update_user(uid: str, body: UserUpdate, user=Depends(require_roles("admin"))):
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if updates:
+        await db.users.update_one({"id": uid}, {"$set": updates})
+    await audit(user, "update_user", "user", uid, updates)
+    doc = await db.users.find_one({"id": uid}, {"_id": 0, "password_hash": 0})
     return doc
 
-# -------------------- SETTINGS --------------------
-@api.get("/settings")
-async def get_settings():
-    doc = await db.settings.find_one({"key": "app"}, {"_id": 0})
-    return doc or {"key": "app", "company_name": "Distribution Co.", "default_buffer_days": 14, "safety_stock_days": 7, "currency": "USD"}
+@api.post("/users/{uid}/reset-password")
+async def reset_password(uid: str, body: PasswordChange, user=Depends(require_roles("admin"))):
+    await db.users.update_one({"id": uid}, {"$set": {"password_hash": hash_pw(body.new_password)}})
+    await audit(user, "reset_password", "user", uid)
+    return {"ok": True}
 
-@api.put("/settings")
-async def update_settings(body: Dict[str, Any]):
-    body["key"] = "app"
-    await db.settings.update_one({"key": "app"}, {"$set": body}, upsert=True)
-    return body
+@api.delete("/users/{uid}")
+async def delete_user(uid: str, user=Depends(require_roles("admin"))):
+    if uid == user["id"]:
+        raise HTTPException(400, "Tidak bisa menghapus akun sendiri")
+    await db.users.update_one({"id": uid}, {"$set": {"active": False}})
+    await audit(user, "deactivate_user", "user", uid)
+    return {"ok": True}
 
-# -------------------- REPORTS --------------------
-@api.get("/reports/{name}")
-async def report(name: str):
-    if name in ("inventory-health", "stock-coverage", "dead-stock", "slow-moving", "abc-analysis"):
-        rows = await _compute_inventory()
-        if name == "dead-stock":
-            rows = [r for r in rows if r["status_label"] == "dead_stock"]
-        elif name == "slow-moving":
-            rows = [r for r in rows if r["status_label"] in ("slow_moving", "overstock")]
-        elif name == "abc-analysis":
-            rows = sorted(rows, key=lambda x: (x["abc"], -x["stock_value"]))
-        return rows
-    if name == "purchase-recommendation":
-        return await purchase_planning()
-    if name == "factory-moq":
-        data = await purchase_planning()
-        return data["factory_moq"]
-    if name == "incoming-po":
-        return await db.po.find({}, {"_id": 0}).sort("eta", 1).to_list(1000)
-    raise HTTPException(404, "Report not found")
+# -------------------- CATEGORIES --------------------
+@api.get("/categories")
+async def list_categories(user=Depends(current_user)):
+    docs = await db.categories.find({}, {"_id": 0}).sort("name", 1).to_list(200)
+    return docs
 
-# -------------------- AI INSIGHT --------------------
-@api.post("/ai/insight")
-async def ai_insight(req: AIRequest):
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        raise HTTPException(500, "AI key missing")
-    # Build compact context
-    if req.context == "dashboard":
-        summary = await dashboard()
-        kpis = summary["kpis"]
-        alerts = summary["alerts"]
-        delayed = summary["delayed_po"]
-        planning = await purchase_planning()
-        moq_gaps = [m for m in planning["factory_moq"] if not m["satisfied"]]
-        context_text = (
-            f"KPIs: {kpis}. "
-            f"Red alerts ({len(alerts['red'])}): {alerts['red'][:5]}. "
-            f"Orange ({len(alerts['orange'])}): {alerts['orange'][:3]}. "
-            f"Delayed POs ({len(delayed)}): {delayed[:3]}. "
-            f"Factory MOQ gaps: {moq_gaps[:5]}."
-        )
-    else:
-        context_text = str(req.payload)[:4000]
+@api.post("/categories")
+async def create_category(body: CategoryModel, user=Depends(require_roles("admin"))):
+    if await db.categories.find_one({"code": body.code}):
+        raise HTTPException(400, "Kode kategori sudah ada")
+    doc = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": now_iso()}
+    await db.categories.insert_one(doc)
+    await audit(user, "create_category", "category", doc["id"], {"name": body.name})
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+@api.put("/categories/{cid}")
+async def update_category(cid: str, body: CategoryModel, user=Depends(require_roles("admin"))):
+    await db.categories.update_one({"id": cid}, {"$set": body.model_dump()})
+    await audit(user, "update_category", "category", cid)
+    doc = await db.categories.find_one({"id": cid}, {"_id": 0})
+    return doc
+
+@api.delete("/categories/{cid}")
+async def delete_category(cid: str, user=Depends(require_roles("admin"))):
+    await db.categories.update_one({"id": cid}, {"$set": {"active": False}})
+    await audit(user, "deactivate_category", "category", cid)
+    return {"ok": True}
+
+# -------------------- FILE UPLOAD --------------------
+@api.post("/files/upload")
+async def upload_file(file: UploadFile = File(...), user=Depends(current_user)):
+    ext = (file.filename or "bin").split(".")[-1].lower()
+    if ext not in MIME_TYPES:
+        raise HTTPException(400, "Format tidak didukung. Gunakan jpg/png/webp/pdf")
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Ukuran maks 10MB")
+    file_id = str(uuid.uuid4())
+    path = f"{APP_NAME}/uploads/{user['id']}/{file_id}.{ext}"
+    result = put_object(path, data, file.content_type or MIME_TYPES[ext])
+    doc = {
+        "id": file_id,
+        "storage_path": result["path"],
+        "original_filename": file.filename,
+        "content_type": file.content_type or MIME_TYPES[ext],
+        "size": result.get("size", len(data)),
+        "uploaded_by": user["id"],
+        "is_deleted": False,
+        "created_at": now_iso(),
+    }
+    await db.files.insert_one(doc)
+    return {"id": file_id, "name": file.filename, "size": doc["size"], "content_type": doc["content_type"]}
+
+@api.get("/files/{fid}/download")
+async def download_file(fid: str, user=Depends(current_user)):
+    rec = await db.files.find_one({"id": fid, "is_deleted": False})
+    if not rec:
+        raise HTTPException(404, "File tidak ditemukan")
+    data, ct = get_object(rec["storage_path"])
+    return Response(content=data, media_type=rec.get("content_type", ct),
+                    headers={"Content-Disposition": f'inline; filename="{rec["original_filename"]}"'})
+
+# -------------------- OCR --------------------
+@api.post("/ocr/receipt")
+async def ocr_receipt(file_id: str, user=Depends(current_user)):
+    rec = await db.files.find_one({"id": file_id, "is_deleted": False})
+    if not rec:
+        raise HTTPException(404, "File tidak ditemukan")
+    if not rec["content_type"].startswith("image/"):
+        return {"jumlah": None, "tanggal": None, "merchant": None, "note": "Hanya bisa OCR gambar (jpg/png/webp). PDF tidak didukung untuk auto-fill."}
+    data, _ = get_object(rec["storage_path"])
+    b64 = base64.b64encode(data).decode()
+    prompt = (
+        "Anda adalah asisten OCR untuk struk / nota belanja Bahasa Indonesia. "
+        "Ekstrak informasi dari struk pada gambar ini dan jawab HANYA dengan JSON valid "
+        'dengan format persis: {"jumlah": <angka rupiah total tanpa titik/koma, integer>, '
+        '"tanggal": "<YYYY-MM-DD atau kosong>", "merchant": "<nama toko/warung/SPBU/gerbang tol>", '
+        '"kategori_tebakan": "<Karcis Tol|Bensin|ATK|Kebersihan|Konsumsi|Lain-lain>", '
+        '"catatan": "<catatan singkat 1 kalimat>"}. Jangan sertakan teks lain di luar JSON.'
+    )
     try:
         chat = LlmChat(
-            api_key=api_key,
-            session_id=f"idss-{uuid.uuid4()}",
-            system_message=(
-                "You are an inventory analyst for a distribution company. "
-                "Given the current inventory state, produce 4-6 short, direct, actionable bullet insights. "
-                "Each bullet must start with a number of items or a factory name and be under 20 words. "
-                "Focus on: stock-outs, delayed POs, factory MOQ gaps, purchase deadlines, campaign impact. "
-                "Do not add greetings or closings. Output plain text bullets starting with '- '."
-            ),
+            api_key=EMERGENT_KEY,
+            session_id=f"ocr-{uuid.uuid4()}",
+            system_message="Anda ahli membaca struk / nota Bahasa Indonesia. Selalu jawab JSON valid saja.",
         ).with_model("openai", "gpt-5.6-terra")
-        msg = UserMessage(text=f"State:\n{context_text}\n\nProduce bullet insights.")
+        img = ImageContent(image_base64=b64)
+        msg = UserMessage(text=prompt, file_contents=[img])
         text = ""
-        try:
-            resp = await chat.send_message(msg)
-            text = resp if isinstance(resp, str) else str(resp)
-        except (AttributeError, TypeError):
-            async for ev in chat.stream_message(msg):
-                if hasattr(ev, "content"):
-                    text += ev.content
-        insights = [line.lstrip("- ").strip() for line in text.splitlines() if line.strip().startswith("-")]
-        if not insights:
-            insights = [line.strip() for line in text.splitlines() if line.strip()][:6]
-        return {"insights": insights, "raw": text}
+        from emergentintegrations.llm.chat import TextDelta, StreamDone
+        async for ev in chat.stream_message(msg):
+            if isinstance(ev, TextDelta):
+                text += ev.content
+            elif isinstance(ev, StreamDone):
+                break
+        import json, re
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        raw = m.group(0) if m else text
+        parsed = json.loads(raw)
+        return parsed
     except Exception as e:
-        logger.exception("AI insight failed")
-        # Rule-based fallback
-        return {"insights": _rule_based_insights(await dashboard(), await purchase_planning()), "error": str(e)}
+        logger.exception("OCR failed")
+        return {"jumlah": None, "tanggal": None, "merchant": None, "kategori_tebakan": None, "catatan": f"OCR gagal: {e}"}
 
-def _rule_based_insights(dash, planning):
-    kpis = dash["kpis"]
-    out = []
-    if kpis["stock_out_sku"]:
-        out.append(f"{kpis['stock_out_sku']} items are currently stock out and need immediate action.")
-    if kpis["critical_sku"]:
-        out.append(f"{kpis['critical_sku']} items at risk of stock out within lead time.")
-    if dash["delayed_po"]:
-        out.append(f"{len(dash['delayed_po'])} purchase orders are delayed past their ETA.")
-    for m in planning["factory_moq"]:
-        if not m["satisfied"] and m["minimum_ton"]:
-            out.append(f"Factory {m['factory']} still needs {m['gap']} tons to satisfy MOQ.")
-    if kpis["dead_stock_sku"]:
-        out.append(f"{kpis['dead_stock_sku']} SKUs classified as dead stock — consider clearance.")
-    if kpis["slow_moving_sku"]:
-        out.append(f"{kpis['slow_moving_sku']} slow-moving SKUs tying up working capital.")
-    if not out:
-        out.append("Inventory looks healthy. No urgent actions detected.")
-    return out[:6]
+# -------------------- PETTY CASH --------------------
+async def get_petty_cash() -> dict:
+    doc = await db.petty_cash.find_one({"key": "wallet"})
+    if not doc:
+        doc = {"key": "wallet", "saldo_awal": 5000000, "saldo_sekarang": 5000000, "updated_at": now_iso()}
+        await db.petty_cash.insert_one(doc)
+    return {"saldo_awal": doc["saldo_awal"], "saldo_sekarang": doc["saldo_sekarang"], "updated_at": doc.get("updated_at")}
 
-# -------------------- SEED / DEMO --------------------
-@api.post("/demo/seed")
-async def seed_demo():
-    """Populate a small realistic demo dataset for quick preview."""
-    await db.items.delete_many({})
-    await db.stock.delete_many({})
-    await db.po.delete_many({})
-    await db.sales.delete_many({})
-    await db.factories.delete_many({})
-    await db.campaigns.delete_many({})
+async def apply_petty_cash(delta: float, actor: dict, tx_type: str, ref_id: str, description: str):
+    doc = await db.petty_cash.find_one({"key": "wallet"})
+    if not doc:
+        await get_petty_cash()
+        doc = await db.petty_cash.find_one({"key": "wallet"})
+    new_balance = doc["saldo_sekarang"] + delta
+    await db.petty_cash.update_one({"key": "wallet"}, {"$set": {"saldo_sekarang": new_balance, "updated_at": now_iso()}})
+    await db.petty_cash_tx.insert_one({
+        "id": str(uuid.uuid4()),
+        "type": tx_type,
+        "amount": abs(delta),
+        "delta": delta,
+        "ref_id": ref_id,
+        "description": description,
+        "actor_id": actor["id"],
+        "actor_name": actor.get("name") or actor["username"],
+        "balance_after": new_balance,
+        "created_at": now_iso(),
+    })
+    return new_balance
 
-    factories = [
-        {"id": str(uuid.uuid4()), "factory_name": "APP", "supplier": "Asia Pulp & Paper", "minimum_order_ton": 20, "maximum_order_ton": 60, "standard_lead_time": 45, "purchase_type": "Scheduled", "purchase_schedule_day": 25},
-        {"id": str(uuid.uuid4()), "factory_name": "Nippon", "supplier": "Nippon Paper", "minimum_order_ton": 15, "maximum_order_ton": 45, "standard_lead_time": 30, "purchase_type": "Scheduled", "purchase_schedule_day": 10},
-        {"id": str(uuid.uuid4()), "factory_name": "LocalMill", "supplier": "PT Kertas Lokal", "minimum_order_ton": 5, "maximum_order_ton": 20, "standard_lead_time": 14, "purchase_type": "Dynamic", "purchase_schedule_day": 0},
-    ]
-    await db.factories.insert_many(factories)
+@api.get("/petty-cash")
+async def petty_cash_status(user=Depends(current_user)):
+    wallet = await get_petty_cash()
+    txs = await db.petty_cash_tx.find({}, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
+    return {**wallet, "transactions": txs}
 
-    demo_items = [
-        ("HVS-A4-70", "HVS Paper A4 70gsm", "PaperCo", "Office Paper", "Asia Pulp & Paper", "APP", "JKT-01", 12.5, 40, True, 45, 7, 21, 40, 850000),
-        ("HVS-A4-80", "HVS Paper A4 80gsm", "PaperCo", "Office Paper", "Asia Pulp & Paper", "APP", "JKT-01", 14.0, 40, True, 45, 7, 21, 40, 620000),
-        ("HVS-F4-70", "HVS Paper F4 70gsm", "PaperCo", "Office Paper", "Asia Pulp & Paper", "APP", "JKT-01", 13.0, 40, True, 45, 7, 21, 40, 410000),
-        ("NCR-2P-A4", "NCR Paper 2-ply A4", "PaperCo", "Specialty Paper", "Nippon Paper", "Nippon", "JKT-01", 15.0, 30, True, 30, 5, 14, 30, 220000),
-        ("NCR-3P-A4", "NCR Paper 3-ply A4", "PaperCo", "Specialty Paper", "Nippon Paper", "Nippon", "JKT-01", 18.0, 30, True, 30, 5, 14, 30, 180000),
-        ("KRAFT-70", "Kraft Paper 70gsm", "KraftPro", "Kraft Paper", "PT Kertas Lokal", "LocalMill", "SBY-02", 20.0, 20, False, 14, 5, 10, 0, 95000),
-        ("KRAFT-90", "Kraft Paper 90gsm", "KraftPro", "Kraft Paper", "PT Kertas Lokal", "LocalMill", "SBY-02", 22.0, 20, False, 14, 5, 10, 0, 78000),
-        ("CARB-A4", "Carbonless Paper A4", "PaperCo", "Specialty Paper", "Nippon Paper", "Nippon", "JKT-01", 12.0, 30, True, 30, 5, 14, 30, 45000),
-        ("ART-150", "Art Paper 150gsm", "PaperCo", "Coated Paper", "Asia Pulp & Paper", "APP", "JKT-01", 25.0, 25, True, 45, 7, 21, 25, 320000),
-        ("ART-230", "Art Paper 230gsm", "PaperCo", "Coated Paper", "Asia Pulp & Paper", "APP", "JKT-01", 28.0, 25, True, 45, 7, 21, 25, 150000),
-        ("DUPLEX-250", "Duplex Board 250gsm", "BoardMax", "Board", "PT Kertas Lokal", "LocalMill", "SBY-02", 30.0, 15, False, 14, 5, 10, 0, 42000),
-        ("STICKER-A4", "Sticker Paper A4", "PaperCo", "Specialty Paper", "Nippon Paper", "Nippon", "JKT-01", 8.0, 20, True, 30, 5, 14, 20, 18000),
-    ]
-    items = []
-    stocks = []
-    today = datetime.now(timezone.utc).date()
-    for code, desc, brand, cat, sup, fac, wh, wpb, bpp, byp, lt, ss, bd, moq, val in demo_items:
-        items.append({
-            "id": str(uuid.uuid4()), "item_code": code, "description": desc, "brand": brand, "category": cat,
-            "supplier": sup, "factory": fac, "warehouse": wh, "unit": "BOX",
-            "weight_per_box": wpb, "boxes_per_pallet": bpp, "purchase_by_pallet": byp,
-            "lead_time": lt, "safety_stock_days": ss, "default_buffer_days": bd,
-            "moq_per_pallet": moq, "inventory_value": val, "status": "Active",
-        })
-        stocks.append({
-            "id": str(uuid.uuid4()), "warehouse": wh, "item_code": code,
-            "available_qty": max(0, val / 1000), "reserved_qty": 0, "blocked_qty": 0,
-            "total_qty": max(0, val / 1000), "inventory_value": val,
-        })
-    await db.items.insert_many(items)
-    await db.stock.insert_many(stocks)
-    # Sales for last 90 days
-    import random
-    random.seed(42)
-    sales = []
-    for it in items:
-        base = max(5, int(it["inventory_value"] / 30000))
-        for day in range(90):
-            d = today - timedelta(days=day)
-            qty = max(0, int(random.gauss(base, base * 0.4)))
-            if qty <= 0:
-                continue
-            sales.append({
-                "id": str(uuid.uuid4()), "date": d.isoformat(), "item_code": it["item_code"],
-                "customer": f"CUST-{random.randint(100,999)}", "sales_qty": qty,
-                "sales_value": qty * random.uniform(50, 200), "warehouse": it["warehouse"], "channel": random.choice(["Retail", "Wholesale", "Online"]),
-            })
-    if sales:
-        await db.sales.insert_many(sales)
-    # POs
-    pos = [
-        {"id": str(uuid.uuid4()), "po_number": "PO-2401", "supplier": "Asia Pulp & Paper", "factory": "APP", "item_code": "HVS-A4-70", "qty": 400, "eta": (today + timedelta(days=10)).isoformat(), "status": "Open", "weight": 5000, "tonnage": 5},
-        {"id": str(uuid.uuid4()), "po_number": "PO-2402", "supplier": "Nippon Paper", "factory": "Nippon", "item_code": "NCR-2P-A4", "qty": 200, "eta": (today - timedelta(days=3)).isoformat(), "status": "Open", "weight": 3000, "tonnage": 3},
-        {"id": str(uuid.uuid4()), "po_number": "PO-2403", "supplier": "PT Kertas Lokal", "factory": "LocalMill", "item_code": "KRAFT-70", "qty": 300, "eta": (today + timedelta(days=5)).isoformat(), "status": "Open", "weight": 6000, "tonnage": 6},
-        {"id": str(uuid.uuid4()), "po_number": "PO-2404", "supplier": "Asia Pulp & Paper", "factory": "APP", "item_code": "ART-150", "qty": 150, "eta": (today + timedelta(days=25)).isoformat(), "status": "Open", "weight": 3750, "tonnage": 3.75},
-    ]
-    await db.po.insert_many(pos)
-    await db.campaigns.insert_many([{
-        "id": str(uuid.uuid4()), "name": "Back To School",
-        "start_date": today.isoformat(),
-        "end_date": (today + timedelta(days=30)).isoformat(),
-        "item_code": "HVS-A4-70", "expected_sales_increase_pct": 35,
-    }])
-    return {"ok": True, "items": len(items), "sales": len(sales), "pos": len(pos)}
+@api.put("/petty-cash/saldo-awal")
+async def set_saldo_awal(body: PettyCashInit, user=Depends(require_roles("admin"))):
+    doc = await db.petty_cash.find_one({"key": "wallet"}) or {}
+    old = doc.get("saldo_awal", 0)
+    await db.petty_cash.update_one(
+        {"key": "wallet"},
+        {"$set": {"saldo_awal": body.saldo_awal, "saldo_sekarang": body.saldo_awal, "updated_at": now_iso(), "key": "wallet"}},
+        upsert=True,
+    )
+    await audit(user, "set_saldo_awal", "petty_cash", "wallet", {"old": old, "new": body.saldo_awal})
+    return await get_petty_cash()
 
-@api.delete("/demo/clear")
-async def clear_all():
-    for c in ["items", "stock", "po", "sales", "campaigns", "factories", "upload_history"]:
-        await db[c].delete_many({})
+# -------------------- CLAIMS --------------------
+CLAIM_STATUS = ["DRAFT", "DIAJUKAN", "PERLU_KOREKSI", "MENUNGGU_APPROVAL", "DITOLAK", "MENUNGGU_PEMBAYARAN", "DIBAYAR"]
+
+async def _gen_code(prefix: str) -> str:
+    d = datetime.now(timezone.utc)
+    seq = await db.counters.find_one_and_update(
+        {"key": f"{prefix}-{d.year}{d.month:02d}"},
+        {"$inc": {"n": 1}},
+        upsert=True, return_document=True,
+    )
+    n = seq.get("n", 1) if seq else 1
+    return f"{prefix}-{d.year}{d.month:02d}-{n:04d}"
+
+async def _claim_to_public(c):
+    c = {k: v for k, v in c.items() if k != "_id"}
+    # attach receipt/proof file metadata
+    file_ids = list((c.get("receipt_ids") or []) + (c.get("transfer_proof_ids") or []))
+    if file_ids:
+        files = await db.files.find({"id": {"$in": file_ids}}, {"_id": 0, "storage_path": 0}).to_list(50)
+        fmap = {f["id"]: f for f in files}
+        c["receipts"] = [fmap.get(i) for i in (c.get("receipt_ids") or []) if fmap.get(i)]
+        c["transfer_proofs"] = [fmap.get(i) for i in (c.get("transfer_proof_ids") or []) if fmap.get(i)]
+    else:
+        c["receipts"] = []
+        c["transfer_proofs"] = []
+    return c
+
+def _push_timeline(claim: dict, actor: dict, action: str, note: str = ""):
+    tl = claim.get("timeline") or []
+    tl.append({
+        "action": action,
+        "actor_id": actor["id"],
+        "actor_name": actor.get("name") or actor["username"],
+        "actor_role": actor["role"],
+        "note": note,
+        "at": now_iso(),
+    })
+    return tl
+
+@api.post("/claims")
+async def create_claim(body: ClaimCreate, user=Depends(current_user)):
+    cat = await db.categories.find_one({"id": body.category_id})
+    if not cat:
+        raise HTTPException(400, "Kategori tidak ditemukan")
+    code = await _gen_code("KLM")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "code": code,
+        "user_id": user["id"],
+        "user_name": user.get("name") or user["username"],
+        "category_id": cat["id"],
+        "category_name": cat["name"],
+        "category_code": cat["code"],
+        "tanggal": body.tanggal,
+        "deskripsi": body.deskripsi,
+        "tujuan": body.tujuan or "",
+        "jumlah": float(body.jumlah),
+        "receipt_ids": body.receipt_ids,
+        "transfer_proof_ids": [],
+        "status": "DRAFT",
+        "timeline": [],
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    doc["timeline"] = _push_timeline(doc, user, "created")
+    await db.claims.insert_one(doc)
+    await audit(user, "create_claim", "claim", doc["id"], {"code": code, "jumlah": doc["jumlah"]})
+    return await _claim_to_public(doc)
+
+@api.get("/claims")
+async def list_claims(
+    status: Optional[str] = None,
+    mine: Optional[bool] = False,
+    q: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    category_id: Optional[str] = None,
+    user=Depends(current_user),
+):
+    query = {}
+    role = user["role"]
+    if mine or role == "user":
+        query["user_id"] = user["id"]
+    if status:
+        query["status"] = status.upper()
+    if category_id:
+        query["category_id"] = category_id
+    if from_date:
+        query["tanggal"] = {**query.get("tanggal", {}), "$gte": from_date}
+    if to_date:
+        query["tanggal"] = {**query.get("tanggal", {}), "$lte": to_date}
+    if q:
+        query["$or"] = [
+            {"code": {"$regex": q, "$options": "i"}},
+            {"deskripsi": {"$regex": q, "$options": "i"}},
+            {"user_name": {"$regex": q, "$options": "i"}},
+        ]
+    docs = await db.claims.find(query).sort("created_at", -1).limit(500).to_list(500)
+    return [await _claim_to_public(d) for d in docs]
+
+@api.get("/claims/{cid}")
+async def get_claim(cid: str, user=Depends(current_user)):
+    c = await db.claims.find_one({"id": cid})
+    if not c:
+        raise HTTPException(404, "Klaim tidak ditemukan")
+    if user["role"] == "user" and c["user_id"] != user["id"]:
+        raise HTTPException(403, "Bukan klaim Anda")
+    return await _claim_to_public(c)
+
+@api.put("/claims/{cid}")
+async def update_claim(cid: str, body: ClaimCreate, user=Depends(current_user)):
+    c = await db.claims.find_one({"id": cid})
+    if not c:
+        raise HTTPException(404, "Klaim tidak ditemukan")
+    if c["user_id"] != user["id"]:
+        raise HTTPException(403, "Bukan klaim Anda")
+    if c["status"] not in ("DRAFT", "PERLU_KOREKSI"):
+        raise HTTPException(400, "Klaim tidak bisa diedit pada status saat ini")
+    cat = await db.categories.find_one({"id": body.category_id})
+    if not cat:
+        raise HTTPException(400, "Kategori tidak ditemukan")
+    upd = {
+        "category_id": cat["id"], "category_name": cat["name"], "category_code": cat["code"],
+        "tanggal": body.tanggal, "deskripsi": body.deskripsi, "tujuan": body.tujuan or "",
+        "jumlah": float(body.jumlah), "receipt_ids": body.receipt_ids,
+        "updated_at": now_iso(),
+    }
+    await db.claims.update_one({"id": cid}, {"$set": upd})
+    await audit(user, "update_claim", "claim", cid)
+    c2 = await db.claims.find_one({"id": cid})
+    return await _claim_to_public(c2)
+
+@api.post("/claims/{cid}/submit")
+async def submit_claim(cid: str, user=Depends(current_user)):
+    c = await db.claims.find_one({"id": cid})
+    if not c:
+        raise HTTPException(404, "Klaim tidak ditemukan")
+    if c["user_id"] != user["id"]:
+        raise HTTPException(403, "Bukan klaim Anda")
+    if c["status"] not in ("DRAFT", "PERLU_KOREKSI"):
+        raise HTTPException(400, "Klaim sudah diajukan")
+    if not c.get("receipt_ids"):
+        raise HTTPException(400, "Bukti pembayaran wajib diunggah")
+    if c.get("jumlah", 0) <= 0:
+        raise HTTPException(400, "Jumlah klaim harus lebih dari 0")
+    tl = _push_timeline(c, user, "submitted")
+    await db.claims.update_one({"id": cid}, {"$set": {"status": "DIAJUKAN", "timeline": tl, "submitted_at": now_iso(), "updated_at": now_iso()}})
+    await audit(user, "submit_claim", "claim", cid)
+    return await _claim_to_public(await db.claims.find_one({"id": cid}))
+
+@api.post("/claims/{cid}/verify")
+async def verify_claim(cid: str, body: ClaimAction, decision: str = Query(...), user=Depends(require_roles("verifikator"))):
+    """decision: approve | correction | reject"""
+    c = await db.claims.find_one({"id": cid})
+    if not c:
+        raise HTTPException(404, "Klaim tidak ditemukan")
+    if c["status"] != "DIAJUKAN":
+        raise HTTPException(400, "Status klaim tidak sesuai")
+    dec = decision.lower()
+    if dec == "approve":
+        new_status = "MENUNGGU_APPROVAL"
+        action = "verified"
+    elif dec == "correction":
+        new_status = "PERLU_KOREKSI"
+        action = "returned_for_correction"
+    elif dec == "reject":
+        new_status = "DITOLAK"
+        action = "rejected_by_verifikator"
+    else:
+        raise HTTPException(400, "decision harus approve/correction/reject")
+    tl = _push_timeline(c, user, action, body.catatan or "")
+    upd = {"status": new_status, "timeline": tl, "verified_at": now_iso(), "verifikator_note": body.catatan or "", "updated_at": now_iso()}
+    await db.claims.update_one({"id": cid}, {"$set": upd})
+    await audit(user, f"verify_{dec}", "claim", cid, {"note": body.catatan or ""})
+    return await _claim_to_public(await db.claims.find_one({"id": cid}))
+
+@api.post("/claims/{cid}/approve")
+async def approve_claim(cid: str, body: ClaimAction, decision: str = Query(...), user=Depends(require_roles("atasan"))):
+    """decision: approve | reject"""
+    c = await db.claims.find_one({"id": cid})
+    if not c:
+        raise HTTPException(404, "Klaim tidak ditemukan")
+    if c["status"] != "MENUNGGU_APPROVAL":
+        raise HTTPException(400, "Status klaim tidak sesuai")
+    dec = decision.lower()
+    if dec == "approve":
+        new_status = "MENUNGGU_PEMBAYARAN"
+        action = "approved_by_atasan"
+    elif dec == "reject":
+        new_status = "DITOLAK"
+        action = "rejected_by_atasan"
+    else:
+        raise HTTPException(400, "decision harus approve/reject")
+    tl = _push_timeline(c, user, action, body.catatan or "")
+    upd = {"status": new_status, "timeline": tl, "approved_at": now_iso(), "atasan_note": body.catatan or "", "updated_at": now_iso()}
+    await db.claims.update_one({"id": cid}, {"$set": upd})
+    await audit(user, f"approve_{dec}", "claim", cid, {"note": body.catatan or ""})
+    return await _claim_to_public(await db.claims.find_one({"id": cid}))
+
+@api.post("/claims/{cid}/pay")
+async def pay_claim(cid: str, body: ClaimAction, user=Depends(require_roles("verifikator"))):
+    c = await db.claims.find_one({"id": cid})
+    if not c:
+        raise HTTPException(404, "Klaim tidak ditemukan")
+    if c["status"] != "MENUNGGU_PEMBAYARAN":
+        raise HTTPException(400, "Klaim belum siap dibayar")
+    if not body.transfer_proof_ids:
+        raise HTTPException(400, "Bukti transfer wajib diunggah")
+    wallet = await get_petty_cash()
+    if wallet["saldo_sekarang"] < c["jumlah"]:
+        raise HTTPException(400, f"Saldo petty cash tidak cukup (Rp {wallet['saldo_sekarang']:,.0f}). Silakan request top-up terlebih dahulu.")
+    tl = _push_timeline(c, user, "paid", body.catatan or "")
+    upd = {
+        "status": "DIBAYAR", "timeline": tl, "paid_at": now_iso(),
+        "transfer_proof_ids": body.transfer_proof_ids, "pembayaran_note": body.catatan or "",
+        "updated_at": now_iso(),
+    }
+    await db.claims.update_one({"id": cid}, {"$set": upd})
+    await apply_petty_cash(-c["jumlah"], user, "OUT", cid, f"Pembayaran klaim {c['code']} - {c['user_name']}")
+    await audit(user, "pay_claim", "claim", cid, {"jumlah": c["jumlah"]})
+    return await _claim_to_public(await db.claims.find_one({"id": cid}))
+
+@api.delete("/claims/{cid}")
+async def delete_claim(cid: str, user=Depends(current_user)):
+    c = await db.claims.find_one({"id": cid})
+    if not c:
+        raise HTTPException(404, "Klaim tidak ditemukan")
+    if c["user_id"] != user["id"] and user["role"] != "admin":
+        raise HTTPException(403, "Bukan klaim Anda")
+    if c["status"] != "DRAFT":
+        raise HTTPException(400, "Hanya draft yang bisa dihapus")
+    await db.claims.delete_one({"id": cid})
+    await audit(user, "delete_claim", "claim", cid)
     return {"ok": True}
+
+# -------------------- TOP-UP --------------------
+@api.post("/topups")
+async def create_topup(body: TopUpCreate, user=Depends(require_roles("verifikator"))):
+    if body.jumlah <= 0:
+        raise HTTPException(400, "Jumlah top-up harus lebih dari 0")
+    code = await _gen_code("TOP")
+    doc = {
+        "id": str(uuid.uuid4()), "code": code,
+        "requested_by": user["id"], "requested_by_name": user.get("name") or user["username"],
+        "jumlah": float(body.jumlah), "catatan": body.catatan or "",
+        "status": "MENUNGGU_FINANCE",
+        "transfer_proof_ids": [],
+        "timeline": [{"action": "requested", "actor_id": user["id"], "actor_name": user.get("name"), "actor_role": user["role"], "at": now_iso(), "note": body.catatan or ""}],
+        "created_at": now_iso(),
+    }
+    await db.topups.insert_one(doc)
+    await audit(user, "create_topup", "topup", doc["id"], {"jumlah": body.jumlah})
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+@api.get("/topups")
+async def list_topups(user=Depends(current_user)):
+    if user["role"] not in ("verifikator", "finance", "admin", "auditor"):
+        raise HTTPException(403, "Role tidak diizinkan")
+    docs = await db.topups.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+@api.post("/topups/{tid}/approve")
+async def approve_topup(tid: str, body: TopUpApprove, user=Depends(require_roles("finance"))):
+    if not body.transfer_proof_ids:
+        raise HTTPException(400, "Bukti transfer wajib diunggah")
+    t = await db.topups.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "Top-up tidak ditemukan")
+    if t["status"] != "MENUNGGU_FINANCE":
+        raise HTTPException(400, "Status tidak sesuai")
+    tl = t.get("timeline", []) + [{"action": "approved", "actor_id": user["id"], "actor_name": user.get("name"), "actor_role": user["role"], "at": now_iso(), "note": body.catatan or ""}]
+    await db.topups.update_one({"id": tid}, {"$set": {"status": "SELESAI", "timeline": tl, "transfer_proof_ids": body.transfer_proof_ids, "approved_at": now_iso()}})
+    await apply_petty_cash(t["jumlah"], user, "IN", tid, f"Top-up {t['code']} oleh Finance")
+    await audit(user, "approve_topup", "topup", tid, {"jumlah": t["jumlah"]})
+    return await db.topups.find_one({"id": tid}, {"_id": 0})
+
+@api.post("/topups/{tid}/reject")
+async def reject_topup(tid: str, body: TopUpApprove, user=Depends(require_roles("finance"))):
+    t = await db.topups.find_one({"id": tid})
+    if not t or t["status"] != "MENUNGGU_FINANCE":
+        raise HTTPException(400, "Status tidak sesuai")
+    tl = t.get("timeline", []) + [{"action": "rejected", "actor_id": user["id"], "actor_name": user.get("name"), "actor_role": user["role"], "at": now_iso(), "note": body.catatan or ""}]
+    await db.topups.update_one({"id": tid}, {"$set": {"status": "DITOLAK", "timeline": tl, "rejected_at": now_iso()}})
+    await audit(user, "reject_topup", "topup", tid)
+    return await db.topups.find_one({"id": tid}, {"_id": 0})
+
+# -------------------- DASHBOARD --------------------
+@api.get("/dashboard")
+async def dashboard(user=Depends(current_user)):
+    role = user["role"]
+    wallet = await get_petty_cash()
+    counts = {}
+    # Antrean per role
+    if role in ("verifikator", "admin", "auditor"):
+        counts["verifikasi"] = await db.claims.count_documents({"status": "DIAJUKAN"})
+        counts["pembayaran"] = await db.claims.count_documents({"status": "MENUNGGU_PEMBAYARAN"})
+    if role in ("atasan", "admin", "auditor"):
+        counts["approval"] = await db.claims.count_documents({"status": "MENUNGGU_APPROVAL"})
+    if role in ("finance", "admin", "auditor"):
+        counts["topup"] = await db.topups.count_documents({"status": "MENUNGGU_FINANCE"})
+    if role == "user":
+        counts["klaim_saya"] = await db.claims.count_documents({"user_id": user["id"]})
+        counts["perlu_koreksi"] = await db.claims.count_documents({"user_id": user["id"], "status": "PERLU_KOREKSI"})
+        counts["diproses"] = await db.claims.count_documents({"user_id": user["id"], "status": {"$in": ["DIAJUKAN", "MENUNGGU_APPROVAL", "MENUNGGU_PEMBAYARAN"]}})
+        counts["selesai"] = await db.claims.count_documents({"user_id": user["id"], "status": "DIBAYAR"})
+
+    # KPI umum
+    total_claims = await db.claims.count_documents({})
+    total_paid = 0
+    async for c in db.claims.find({"status": "DIBAYAR"}, {"jumlah": 1}):
+        total_paid += c.get("jumlah", 0)
+    total_pending = 0
+    async for c in db.claims.find({"status": {"$in": ["DIAJUKAN", "MENUNGGU_APPROVAL", "MENUNGGU_PEMBAYARAN"]}}, {"jumlah": 1}):
+        total_pending += c.get("jumlah", 0)
+
+    # Charts
+    today = datetime.now(timezone.utc).date()
+    trend_map = {}
+    for i in range(29, -1, -1):
+        d = (today - timedelta(days=i)).isoformat()
+        trend_map[d] = 0
+    async for c in db.claims.find({"status": "DIBAYAR", "paid_at": {"$exists": True}}, {"paid_at": 1, "jumlah": 1}):
+        try:
+            d = c["paid_at"][:10]
+            if d in trend_map:
+                trend_map[d] += c.get("jumlah", 0)
+        except Exception:
+            pass
+    trend = [{"date": d, "value": v} for d, v in trend_map.items()]
+
+    # Top categories (last 60 days paid)
+    cat_totals = {}
+    cutoff = (today - timedelta(days=60)).isoformat()
+    async for c in db.claims.find({"status": "DIBAYAR", "paid_at": {"$gte": cutoff}}, {"category_name": 1, "jumlah": 1}):
+        k = c.get("category_name") or "Lain-lain"
+        cat_totals[k] = cat_totals.get(k, 0) + c.get("jumlah", 0)
+    top_categories = sorted([{"name": k, "value": v} for k, v in cat_totals.items()], key=lambda x: -x["value"])[:8]
+
+    # Recent claims
+    recent = await db.claims.find({}, {"_id": 0}).sort("created_at", -1).limit(8).to_list(8)
+
+    return {
+        "wallet": wallet,
+        "counts": counts,
+        "kpi": {"total_claims": total_claims, "total_paid": total_paid, "total_pending": total_pending},
+        "trend": trend,
+        "top_categories": top_categories,
+        "recent": [await _claim_to_public(c) for c in recent],
+    }
+
+# -------------------- RECONCILIATION --------------------
+@api.get("/reconciliation")
+async def reconciliation(user=Depends(current_user)):
+    wallet = await get_petty_cash()
+    total_out = 0
+    total_in = 0
+    async for t in db.petty_cash_tx.find({}, {"amount": 1, "delta": 1, "type": 1}):
+        if t.get("delta", 0) < 0:
+            total_out += abs(t.get("delta", 0))
+        else:
+            total_in += t.get("delta", 0)
+    expected = wallet["saldo_awal"] + total_in - total_out
+    diff = wallet["saldo_sekarang"] - expected
+    # (Note: saldo_awal is baked into saldo_sekarang initially. So expected = saldo_awal ONLY if no in/out. Let's rewrite:)
+    # Actually: starting balance was saldo_awal; then each IN adds, each OUT subtracts. So:
+    expected = wallet["saldo_awal"] + total_in - total_out
+    # But wallet was initialized as saldo_sekarang = saldo_awal on creation (no tx yet). So expected math works if we ONLY count tx after init.
+    # For simplicity we treat saldo_awal + tx_deltas = saldo_sekarang
+    tx_count = await db.petty_cash_tx.count_documents({})
+    return {
+        "saldo_awal": wallet["saldo_awal"],
+        "saldo_sekarang": wallet["saldo_sekarang"],
+        "total_in": total_in,
+        "total_out": total_out,
+        "expected_saldo": expected,
+        "selisih": wallet["saldo_sekarang"] - expected,
+        "balanced": abs(wallet["saldo_sekarang"] - expected) < 0.01,
+        "tx_count": tx_count,
+    }
+
+# -------------------- AUDIT TRAIL --------------------
+@api.get("/audit-trail")
+async def audit_trail(limit: int = 200, user=Depends(require_roles("admin", "auditor"))):
+    docs = await db.audit.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit).to_list(limit)
+    return docs
+
+# -------------------- REPORTS --------------------
+@api.get("/reports/claims")
+async def report_claims(from_date: Optional[str] = None, to_date: Optional[str] = None,
+                        status: Optional[str] = None, category_id: Optional[str] = None,
+                        user=Depends(current_user)):
+    q = {}
+    if user["role"] == "user":
+        q["user_id"] = user["id"]
+    if status: q["status"] = status.upper()
+    if category_id: q["category_id"] = category_id
+    if from_date: q["tanggal"] = {**q.get("tanggal", {}), "$gte": from_date}
+    if to_date: q["tanggal"] = {**q.get("tanggal", {}), "$lte": to_date}
+    docs = await db.claims.find(q, {"_id": 0, "timeline": 0, "receipt_ids": 0, "transfer_proof_ids": 0}).sort("created_at", -1).to_list(2000)
+    return docs
+
+# -------------------- SETUP / BOOTSTRAP --------------------
+DEFAULT_CATEGORIES = [
+    {"code": "TOL", "name": "Karcis Tol", "icon": "Ticket"},
+    {"code": "BBM", "name": "BBM / Bensin", "icon": "GasPump"},
+    {"code": "ATK", "name": "ATK (Alat Tulis Kantor)", "icon": "PencilSimple"},
+    {"code": "CLN", "name": "Alat Kebersihan", "icon": "Broom"},
+    {"code": "KON", "name": "Konsumsi Kantor", "icon": "Coffee"},
+]
+
+@api.get("/setup/status")
+async def setup_status():
+    admin = await db.users.find_one({"role": "admin"})
+    return {"admin_exists": bool(admin)}
+
+@api.post("/setup/init")
+async def setup_init():
+    existing = await db.users.find_one({"role": "admin"})
+    if existing:
+        raise HTTPException(400, "Admin sudah terdaftar")
+    admin_id = str(uuid.uuid4())
+    await db.users.insert_one({
+        "id": admin_id, "username": "admin", "name": "Administrator",
+        "email": "admin@lyra-akrelux.local", "role": "admin", "active": True,
+        "password_hash": hash_pw("admin123"), "created_at": now_iso(),
+    })
+    # Kategori awal
+    for c in DEFAULT_CATEGORIES:
+        await db.categories.insert_one({"id": str(uuid.uuid4()), **c, "active": True, "created_at": now_iso()})
+    # Petty cash awal
+    await get_petty_cash()
+    return {"ok": True, "username": "admin", "password": "admin123"}
 
 @api.get("/")
 async def root():
-    return {"service": "IDSS API", "status": "ok"}
+    return {"service": "eKlaim Lyra API", "status": "ok"}
 
 app.include_router(api)
 
@@ -1179,6 +863,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def _startup():
+    try:
+        init_storage()
+        logger.info("Storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
 
 @app.on_event("shutdown")
 async def _shutdown():

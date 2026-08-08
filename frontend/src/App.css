@@ -1,91 +1,107 @@
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 
 :root {
-  --idss-blue: #2563eb;
-  --idss-blue-hover: #1d4ed8;
-  --idss-orange: #f97316;
-  --idss-orange-hover: #ea580c;
-  --idss-bg: #f8fafc;
-  --idss-surface: #ffffff;
-  --idss-border: #e2e8f0;
-  --idss-ai-bg: #eff6ff;
+  --lyra-bg: #f8fafc;
+  --lyra-surface: #ffffff;
+  --lyra-border: #e2e8f0;
+  --lyra-primary: #0284c7;
+  --lyra-primary-hover: #0369a1;
+  --lyra-accent: #0ea5e9;
 }
 
 html, body, #root {
-  background: var(--idss-bg);
+  background: var(--lyra-bg);
   color: #0f172a;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
 
-h1, h2, h3, h4, h5 { font-family: 'Manrope', sans-serif; letter-spacing: -0.01em; }
-
-.idss-card {
-  background: var(--idss-surface);
-  border: 1px solid var(--idss-border);
-  border-radius: 10px;
+h1, h2, h3, h4, h5 {
+  font-family: 'Manrope', sans-serif;
+  letter-spacing: -0.02em;
 }
 
-.idss-kpi-label {
+.lyra-card {
+  background: var(--lyra-surface);
+  border: 1px solid var(--lyra-border);
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.lyra-card-hover {
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.lyra-card-hover:hover {
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+  border-color: #cbd5e1;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+.lyra-sidebar-item {
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.lyra-sidebar-item.active {
+  background: #e0f2fe;
+  color: #0369a1;
+  font-weight: 600;
+}
+.lyra-sidebar-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 6px; bottom: 6px;
+  width: 3px; background: #0284c7;
+  border-radius: 0 3px 3px 0;
+}
+
+.lyra-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
+.lyra-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+.lyra-scroll::-webkit-scrollbar-track { background: transparent; }
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.status-DRAFT { background: #f1f5f9; color: #475569; }
+.status-DIAJUKAN { background: #dbeafe; color: #1e40af; }
+.status-PERLU_KOREKSI { background: #fef3c7; color: #92400e; }
+.status-MENUNGGU_APPROVAL { background: #ede9fe; color: #5b21b6; }
+.status-MENUNGGU_PEMBAYARAN { background: #ffedd5; color: #9a3412; }
+.status-DIBAYAR { background: #dcfce7; color: #166534; }
+.status-DITOLAK { background: #fee2e2; color: #991b1b; }
+.status-MENUNGGU_FINANCE { background: #dbeafe; color: #1e40af; }
+.status-SELESAI { background: #dcfce7; color: #166534; }
+
+.kpi-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: #64748b;
 }
-
-.idss-kpi-value {
+.kpi-value {
   font-family: 'Manrope', sans-serif;
   font-weight: 700;
   color: #0f172a;
-  font-size: 26px;
+  font-size: 28px;
   line-height: 1.1;
   letter-spacing: -0.02em;
 }
 
-.idss-traffic-red { background: #dc2626; box-shadow: 0 0 10px rgba(220,38,38,0.5); }
-.idss-traffic-orange { background: #ea580c; box-shadow: 0 0 10px rgba(234,88,12,0.5); }
-.idss-traffic-yellow { background: #eab308; box-shadow: 0 0 10px rgba(234,179,8,0.5); }
-.idss-traffic-green { background: #16a34a; box-shadow: 0 0 10px rgba(22,163,74,0.5); }
-
-.idss-ai-panel {
-  background: linear-gradient(180deg, #eff6ff 0%, #ffffff 100%);
-  border: 1px solid #bfdbfe;
-  border-radius: 12px;
-  position: relative;
-  overflow: hidden;
-}
-
-.idss-ai-panel::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, #2563eb 0%, #f97316 100%);
-}
-
-.idss-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
-.idss-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-.idss-scroll::-webkit-scrollbar-track { background: transparent; }
-
-.idss-table-row:hover { background: #f8fafc; }
-
-/* Sidebar */
-.idss-sidebar-item {
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-.idss-sidebar-item.active {
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 600;
-}
-.idss-sidebar-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  background: #2563eb;
-  border-radius: 0 3px 3px 0;
+.lyra-login-bg {
+  background:
+    radial-gradient(circle at 20% 20%, #bae6fd 0%, transparent 40%),
+    radial-gradient(circle at 80% 80%, #7dd3fc 0%, transparent 40%),
+    linear-gradient(135deg, #f0f9ff 0%, #ffffff 100%);
 }
