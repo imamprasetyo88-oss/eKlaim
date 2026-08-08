@@ -1,135 +1,76 @@
 {
-  "project_context": {
-    "name": "Inventory Decision Support System (IDSS)",
-    "description": "A modern, professional Decision Support System (DSS) for Purchasing, Warehouse, PPIC, and Directors. Focuses on inventory health monitoring and purchase planning recommendations. Designed for medium to large distribution companies.",
-    "theme": "light",
-    "style_references": ["Linear", "Power BI", "Notion"],
-    "vibe": "Clean, authoritative, fast, data-dense, executive-level."
-  },
+  "theme": "Light theme default, corporate blue (biru muda + putih). Clean, professional, and trustworthy for finance operations.",
   "typography": {
-    "strategy": "Swiss & High-Contrast (adapted for SaaS)",
-    "headings": {
-      "font": "Manrope",
-      "weights": ["font-semibold", "font-bold"],
-      "styling": "tracking-tight text-slate-900"
-    },
-    "body": {
-      "font": "Inter",
-      "weights": ["font-normal", "font-medium"],
-      "styling": "text-slate-600"
-    },
-    "hierarchy": {
-      "h1": "text-2xl sm:text-3xl font-bold tracking-tight text-slate-900",
-      "h2": "text-lg sm:text-xl font-semibold tracking-tight text-slate-800",
-      "h3": "text-base font-semibold text-slate-800",
-      "body": "text-sm text-slate-600",
-      "small_labels": "text-xs font-semibold uppercase tracking-[0.05em] text-slate-500"
-    }
+    "headings": "Manrope",
+    "body": "IBM Plex Sans",
+    "rules": "Use tight letter spacing for headings (tracking-tight). Use 'tabular-nums' class for all currency and number displays in tables and dashboard widgets to ensure vertical alignment of IDR amounts."
   },
   "colors": {
-    "primary": {
-      "default": "#2563eb",
-      "hover": "#1d4ed8",
-      "foreground": "#ffffff"
-    },
-    "secondary": {
-      "default": "#f97316",
-      "hover": "#ea580c",
-      "foreground": "#ffffff"
-    },
-    "backgrounds": {
-      "app": "#f8fafc",
-      "surface": "#ffffff",
-      "ai_panel": "#eff6ff"
-    },
-    "status_traffic_lights": {
-      "critical_red": "#dc2626",
-      "warning_orange": "#ea580c",
-      "watch_yellow": "#eab308",
-      "healthy_green": "#16a34a"
-    },
-    "borders": {
-      "default": "#e2e8f0",
-      "strong": "#cbd5e1"
-    },
-    "text": {
-      "primary": "#0f172a",
-      "secondary": "#475569",
-      "muted": "#64748b"
-    }
+    "background": "bg-slate-50",
+    "surface": "bg-white",
+    "primary": "bg-sky-600 text-white",
+    "primary_hover": "hover:bg-sky-700 hover:text-white",
+    "accent": "text-sky-500",
+    "success": "bg-emerald-500 text-white",
+    "danger": "bg-red-500 text-white",
+    "warning": "bg-amber-500 text-white",
+    "text_main": "text-slate-900",
+    "text_muted": "text-slate-500",
+    "border": "border-slate-200"
   },
   "visual_enhancers": {
-    "borders_and_shadows": "Use Linear-style quiet chrome. Thin 1px borders (border-slate-200) on all cards. Minimal soft shadows (shadow-sm) only for dropdowns and popovers. Flat cards for data.",
-    "ai_panel_styling": "Give the AI Insight Panel a subtle Tracing Beam effect or a soft linear-gradient border to distinguish it as 'intelligent', paired with a light #eff6ff background.",
-    "traffic_lights": "Implement traffic light indicators as small, glowing 8px circular dots (bg-red-500 shadow-[0_0_8px_rgba(220,38,38,0.4)]) next to text, rather than large colored blocks.",
-    "hover_states": "Interactive rows in tables or lists should have a subtle background shift (hover:bg-slate-50) and buttons must have explicitly defined hover states (e.g., hover:bg-blue-700 hover:text-white)."
+    "shadows": "Use soft ambient shadows: shadow-sm for default cards, shadow-md on hover for interactive elements. Avoid heavy drop shadows.",
+    "borders": "Use 1px solid borders (border-slate-200) on surfaces to maintain a crisp, corporate structure. Use rounded-lg (8px) for buttons and dashboard cards.",
+    "glassmorphism": "Sticky headers and floating navigation must use backdrop-blur-xl bg-white/80 with a border-b border-slate-200. No fully transparent backgrounds."
   },
-  "grids_and_layouts": {
-    "dashboard_grid": "High Density Grid. Base: grid-cols-1 md:grid-cols-3 lg:grid-cols-4. Gap: gap-4 or gap-6.",
-    "kpi_cards": "col-span-1. Compact padding (p-4 or p-5) to fit 10 KPIs neatly.",
-    "charts": "col-span-2 or col-span-4 depending on importance. Fixed heights (e.g., h-72).",
-    "tables": "Dense layout, horizontal scrolling enabled for wide datasets. Right-align numeric columns.",
-    "spacing_scale": "Use generous spacing between sections (py-8) but tight spacing within data clusters (gap-2)."
+  "layouts": {
+    "dashboard": "High Density Bento Grid (grid-cols-1 md:grid-cols-3 lg:grid-cols-4). Tight gaps (gap-4 to gap-6). Top-left metric must be the North Star KPI: 'Saldo Petty Cash' (Petty Cash Balance).",
+    "forms": "Left-aligned within a max-w-3xl container. Group inputs logically (e.g., upload struk multi-file with OCR preview next to it). Use generous spacing (p-6 or p-8) inside form cards.",
+    "tables": "Dense layout for Queues. Clean horizontal dividers, hover states on rows (hover:bg-slate-50). Provide pagination instead of infinite scroll for better control."
   },
-  "component_guidelines": {
-    "shadcn_usage": "Extensively use Shadcn UI (Cards, Tables, Select, Dropdown, Tabs, Dialog, Badge). Customize them to remove Vercel-look by tightening padding and enforcing 1px borders.",
-    "charts": "Use Recharts (via Shadcn Chart components). Ensure tooltips are responsive. Color palettes must match primary (blue), secondary (orange), and traffic light colors.",
-    "navigation": "Left sidebar layout. Sticky. Width 64 (256px). Use Lucide-React icons.",
-    "tables": "Include ABC Analysis column in Inventory Monitoring Table. Purchase Planning needs editable or actionable rows for recommendations.",
-    "alerts_panel": "A dedicated section or sidebar widget showing a prioritized list of alerts categorized by Red/Orange/Yellow/Green."
+  "components": {
+    "icons": "Phosphor Icons (@phosphor-icons/react) - crisp, professional duotone or regular weights.",
+    "charts": "Recharts - simple line charts for expense trends over time, bar charts for top spending categories.",
+    "toasts": "Sonner for all notifications (success, error, warning).",
+    "buttons": "Modern rounded-lg buttons. Primary actions in sky-600, secondary/cancel actions in slate-100 text-slate-700."
   },
-  "media_and_images": {
-    "icons": "lucide-react (Standard choice, clean and professional)",
-    "images": [
-      {
-        "url": "https://images.unsplash.com/photo-1600878459138-e1123b37cb30?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdCUyMHBvcnRyYWl0fGVufDB8fHx8MTc4NjA3NjU5MHww&ixlib=rb-4.1.0&q=85",
-        "category": "user_avatar",
-        "description": "Executive avatar for profile dropdown."
-      },
-      {
-        "url": "https://images.unsplash.com/photo-1609436132311-e4b0c9370469?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHw0fHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdCUyMHBvcnRyYWl0fGVufDB8fHx8MTc4NjA3NjU5MHww&ixlib=rb-4.1.0&q=85",
-        "category": "user_avatar",
-        "description": "Secondary executive avatar."
-      }
-    ]
-  },
-  "motion": {
-    "strategy": "Minimalist micro-interactions. No bouncy or slow animations.",
-    "hover": "Transition transform 0.15s ease, opacity 0.15s ease.",
-    "data_loading": "Use skeleton loaders matching table/card shapes instead of spinning wheels."
+  "image_urls": {
+    "login_background": {
+      "url": "https://images.unsplash.com/photo-1763963301694-3784effa96ac?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzR8MHwxfHNlYXJjaHw0fHxtb2Rlcm4lMjBvZmZpY2UlMjBidWlsZGluZyUyMGV4dGVyaW9yJTIwYmx1ZSUyMGdsYXNzfGVufDB8fHx8MTc4NjE1NjA2Mnww&ixlib=rb-4.1.0&q=85",
+      "description": "Modern office building with a curved blue glass facade against a blue sky. Ideal for a split-screen login page background.",
+      "category": "backgrounds"
+    },
+    "user_avatar": {
+      "url": "https://images.unsplash.com/photo-1560250097-0b93528c311a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxjb3Jwb3JhdGUlMjBwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdHxlbnwwfHx8fDE3ODYxNTYwNjJ8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Professional corporate man portrait, for user profile placeholder in the header or user management table.",
+      "category": "avatars"
+    }
   },
   "accessibility": {
-    "contrast": "Ensure all text against colored backgrounds (like primary buttons) is pure white. Traffic light text should be readable.",
-    "testing": "All interactive elements MUST include data-testid. Example: data-testid='kpi-total-sku', data-testid='sidebar-nav-dashboard'."
+    "contrast": "Ensure minimum 4.5:1 contrast ratio for all text. ALWAYS explicitly set text color on hover (e.g., hover:bg-sky-700 hover:text-white).",
+    "motion": "Respect prefers-reduced-motion. Use framer-motion for subtle entrance animations on dashboard cards.",
+    "data_testid": "All interactive and key informational elements MUST include a data-testid attribute (e.g., data-testid='submit-claim-btn')."
   },
-  "3d_and_creative_libraries": {
-    "usage": "Use sparingly since this is an executive dashboard. Recharts is preferred for charts.",
-    "animations": "framer-motion can be used for subtle tab switching or AI Insight Panel expansion."
-  },
-  "instructions_to_main_agent": {
-    "file_type": "Create `.js` and `.jsx` files ONLY. Do NOT use TypeScript (`.ts`, `.tsx`).",
-    "routing": "Set up React Router with the requested main menu: Dashboard, Inventory Monitoring, Purchase Planning, Purchase Calendar, Data Upload, Master Data, Business Rules, Reports, Settings.",
-    "dashboard_implementation": "Build the main Dashboard view first. Include 10 KPI cards, Alert Panel, AI Insight Panel, and 4 Charts (Sales Trend, Inventory Trend, Incoming PO, by Category).",
-    "data_mocking": "Mock realistic data for ABC analysis, inventory levels, and purchase recommendations. Do not use generic 'Item 1', 'Item 2'. Use realistic distribution industry items (e.g., Electronics, FMCG, or Industrial parts).",
-    "theme_setup": "Implement the specific blue/orange color palette in tailwind.config.js."
-  },
-  "GENERAL UI UX DESIGN GUIDELINES": [
-    "Prioritize optical alignment over strict geometric alignment.",
-    "Never use fully transparent backgrounds for floating elements like dropdowns or sticky headers; use bg-white/90 with backdrop-blur-md.",
-    "Use progressive disclosure: don't overwhelm the user. Hide complex controls behind 'Advanced Filters' or context menus.",
-    "Data density is critical for executives. Eliminate unnecessary white space in tables, but keep margins generous outside components.",
-    "Group related information. Use subtle background colors (like a 50 weight) to delineate sections within cards if necessary.",
-    "All interactive and key informational elements MUST include a data-testid attribute to facilitate robust automated testing."
+  "instructions_to_main_agent": [
+    "You have .js files not .tsx file, so share the guideline for .js files not for .tsx files. Use standard React JSX syntax in .js files.",
+    "Implement the 'eKlaim Lyra' MVP workflow strictly: User submit -> Verifikator check -> Atasan approve -> Verifikator pay -> Finance Top-up.",
+    "UI text MUST be in Bahasa Indonesia (e.g., 'Klaim Menunggu Aksi', 'Saldo Petty Cash', 'Mutasi Keluar', 'Struk', 'Nominal Rupiah').",
+    "For OCR mockup, implement a visual feedback state (loading skeleton -> auto-filled data) when a receipt is uploaded.",
+    "Never use completely transparent backgrounds for elements overlaid on content (dropdowns, sticky headers, modals). Always use a solid color or heavy backdrop blur.",
+    "Limit color usage to signify meaning: Blue for actions/brand, Red for rejection/risk, Green for approval/success, Gray for neutral structure.",
+    "Format currency in IDR (Rp) securely, and apply tabular-nums to numerical table cells.",
+    "Add data-testid attributes extensively to facilitate automated testing.",
+    "Do NOT output AI emoji characters for icons. Instead, implement the specified icon library (Phosphor Icons)."
   ],
-  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
-    "You tend to converge toward generic, 'on distribution' outputs. Avoid the 'AI slop' aesthetic by ensuring tight 1px borders, crisp colors, and excellent typographic hierarchy.",
-    "DO NOT use dark colors as gradients.",
-    "Create depth through layered design elements with z-index hierarchy, NOT heavy box shadows.",
-    "You MUST NOT apply universal transition (transition: all). Use specific transitions (transition-colors, transition-transform).",
-    "You MUST NOT center align the app container (.App { text-align: center; }).",
-    "Always use modern button styles (sharp or slightly rounded with defined hover states).",
-    "NEVER use AI assistant Emoji characters like 🤖🧠💭💡🔮🎯 etc for icons. Use standard UI icons (Lucide/Phosphor).",
-    "Every interactive element needs micro-animations (hover states, focus rings).",
-    "Include data-testid attributes on EVERYTHING interactive."
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur) for floating navigation or dialogs.",
+    "You MUST NOT apply universal transitions (e.g., transition: all). Add specific transitions for properties like background-color, transform, opacity.",
+    "You MUST NOT center align the app container (.App { text-align: center; }). Keep text naturally left-aligned.",
+    "Always use modern button styles (rounded-lg) with clear interaction animations & color relevant to the app style.",
+    "Every interaction needs micro-animations - hover states, transitions, and entrance animations. Static = dead.",
+    "Use 2-3x more spacing than feels comfortable (e.g., p-6 or p-8 inside cards). Cramped designs look cheap.",
+    "Use 'sonner' for toast notifications.",
+    "Prioritize using pre-existing components from src/components/ui when applicable."
   ]
 }
