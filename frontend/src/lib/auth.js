@@ -13,15 +13,18 @@ export function AuthProvider({ children }) {
     api.get("/auth/me").then((r) => setUser(r.data)).catch(() => localStorage.removeItem("eklaim_token")).finally(() => setLoading(false));
   }, []);
 
-  const login = async (username, password) => {
-    const r = await api.post("/auth/login", { username, password });
+  const login = async (username, password, companyId) => {
+    const r = await api.post("/auth/login", { username, password, company_id: companyId });
     localStorage.setItem("eklaim_token", r.data.token);
-    setUser(r.data.user);
-    return r.data.user;
+    localStorage.setItem("eklaim_company", JSON.stringify(r.data.company || {}));
+    const userWithCompany = { ...r.data.user, company: r.data.company };
+    setUser(userWithCompany);
+    return userWithCompany;
   };
 
   const logout = () => {
     localStorage.removeItem("eklaim_token");
+    localStorage.removeItem("eklaim_company");
     setUser(null);
     window.location.href = "/login";
   };

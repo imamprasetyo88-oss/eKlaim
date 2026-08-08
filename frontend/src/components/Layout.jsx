@@ -35,12 +35,12 @@ export default function Layout() {
       <aside className="w-64 border-r border-slate-200 bg-white flex flex-col sticky top-0 h-screen" data-testid="sidebar">
         <div className="px-5 py-5 border-b border-slate-200">
           <div className="flex items-center gap-2">
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-sky-500 to-sky-700 grid place-items-center text-white shadow-sm">
-              <Receipt size={20} weight="fill" />
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sky-500 to-sky-700 grid place-items-center text-white shadow-sm">
+              <Receipt size={18} weight="fill" />
             </div>
-            <div>
-              <div className="font-bold text-slate-900 leading-tight" style={{fontFamily:'Manrope'}}>eKlaim Lyra</div>
-              <div className="text-[10px] uppercase text-slate-500 tracking-wider">Lyra Akrelux</div>
+            <div className="min-w-0">
+              <div className="font-bold text-slate-900 leading-tight text-sm truncate" style={{fontFamily:'Manrope'}}>eKlaim</div>
+              <div className="text-[10px] uppercase text-sky-700 tracking-wider truncate" data-testid="sidebar-company">{user?.company?.name || "—"}</div>
             </div>
           </div>
         </div>
@@ -80,7 +80,7 @@ export default function Layout() {
         <header className="sticky top-0 z-10 backdrop-blur-xl bg-white/80 border-b border-slate-200 px-8 py-3 flex items-center justify-between">
           <div>
             <div className="text-xs text-slate-500">Sistem Klaim & Petty Cash</div>
-            <div className="text-sm font-semibold text-slate-900">Lyra Akrelux</div>
+            <div className="text-sm font-semibold text-slate-900" data-testid="header-company">{user?.company?.name || "—"}</div>
           </div>
           <div className="text-xs text-slate-500 tabular-nums">{new Date().toLocaleDateString("id-ID", {weekday:"long", day:"numeric", month:"long", year:"numeric"})}</div>
         </header>

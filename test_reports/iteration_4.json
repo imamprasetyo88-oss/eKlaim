@@ -1,0 +1,37 @@
+{
+  "summary": "Multi-tenant refactor tested end-to-end. Backend: 14/14 pytest cases pass covering GET /companies public, /setup/status, /setup/init idempotency, login per-company with distinct JWT company_id claims, /auth/me returning company object, and tenant isolation across users/categories/petty_cash/claims/dashboard/audit_trail. Frontend: login flow works for both Lyra & SKP, company dropdown lists 2 companies, sidebar-company + header-company render correct name after login (bug fixed), SKP sees only its own 5 default categories (no Lyra category leak).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "auth.js login()", "issue": "After login, setUser(r.data.user) omitted the company object so Layout's user.company.name showed '—' until page refresh (when /auth/me merges company). Fixed by attaching company to user in setUser call.", "selector": "[data-testid=sidebar-company]/[data-testid=header-company]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts warning: 'width(-1) height(-1) of chart should be greater than 0' — top-categories PieChart container has 0 dimension until data arrives (cosmetic console warning, non-blocking)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_multitenant.py",
+    "/app/test_reports/pytest/mt_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Silence recharts 'width(-1) height(-1)' warning by adding minHeight to PieChart ResponsiveContainer in Dashboard when top_categories is empty.",
+    "OPTIONAL: Consider setting user via /auth/me after login instead of local merge, for a single source of truth."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 981 lines — approaching the >700-line threshold; consider splitting by domain (auth, claims, cash_advances, petty_cash, setup) for maintainability.",
+    "POST /setup/init has no auth guard and is idempotent only after first admin exists — acceptable given the 400 guard, but adding rate-limit or a one-time bootstrap secret would be safer for production.",
+    "In apply_petty_cash, race condition possible on concurrent writes (read-then-write without transaction). Low risk for petty cash workflow but flag for future improvement.",
+    "download_file allows access if file has no company_id (legacy files); after multi-tenant migration this permissive branch should be removed or gated to admin."
+  ],
+  "updated_files": [
+    "/app/frontend/src/lib/auth.js",
+    "/app/backend/tests/test_multitenant.py"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% (login+isolation flows)"},
+  "test_credentials": "Lyra admin: admin/admin123/company_id=<LYRA id from GET /api/companies>; SKP admin: admin/admin123/company_id=<SKP id> (auto-created via POST /api/setup/init?company_id=<SKP_ID> if missing)",
+  "seed_data_creation": "Created TEST_LYRA_ONLY category for Lyra + a few TEST claims (KLM-YYYYMM-*) during isolation tests. No test users seeded.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Multi-tenant isolation verified. Only admin accounts exist (Lyra admin + SKP admin, both admin123). If deeper role-based flow testing is needed (verifikator/atasan/finance/auditor per tenant), create users via POST /api/users using admin token per company. Full E2E claim flow (create→submit→verify→approve→pay) already covered on Lyra side in iteration_3; the refactor did not change status machine, only added company_id filter via cq(user)."
+}
